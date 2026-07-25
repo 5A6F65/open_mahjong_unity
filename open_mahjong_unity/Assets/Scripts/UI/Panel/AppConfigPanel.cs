@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using TMPro;
@@ -27,6 +26,12 @@ public class AppConfigPanel : MonoBehaviour {
     [SerializeField] private TMP_Dropdown handSortHonorDropdown;
     [SerializeField] private TMP_Dropdown handSortDragonDropdown;
     [SerializeField] private TMP_Dropdown handSortRiichiDragonDropdown;
+    [SerializeField] private TMP_Dropdown actionButtonColorDropdown;
+
+    [Header("提示音效")]
+    [SerializeField] private TMP_Dropdown gongHuSoundDropdown;
+    [SerializeField] private TMP_Dropdown matchSuccessSoundDropdown;
+    [SerializeField] private TMP_Dropdown tileOutlinePresetDropdown;
 
     private void Awake() {
         Instance = this;
@@ -38,6 +43,7 @@ public class AppConfigPanel : MonoBehaviour {
         EnsureHandSortHonorDropdown();
         EnsureHandSortDragonDropdown();
         EnsureHandSortRiichiDragonDropdown();
+        EnsureActionButtonColorDropdown();
         InitializeGameplayDropdownOptions();
         if (languageDropdown != null) {
             languageDropdown.onValueChanged.AddListener(OnLanguageDropdownChanged);
@@ -63,6 +69,18 @@ public class AppConfigPanel : MonoBehaviour {
         if (handSortRiichiDragonDropdown != null) {
             handSortRiichiDragonDropdown.onValueChanged.AddListener(OnHandSortRiichiDragonDropdownChanged);
         }
+        if (actionButtonColorDropdown != null) {
+            actionButtonColorDropdown.onValueChanged.AddListener(OnActionButtonColorDropdownChanged);
+        }
+        if (gongHuSoundDropdown != null) {
+            gongHuSoundDropdown.onValueChanged.AddListener(OnGongHuSoundDropdownChanged);
+        }
+        if (matchSuccessSoundDropdown != null) {
+            matchSuccessSoundDropdown.onValueChanged.AddListener(OnMatchSuccessSoundDropdownChanged);
+        }
+        if (tileOutlinePresetDropdown != null) {
+            tileOutlinePresetDropdown.onValueChanged.AddListener(OnTileOutlinePresetDropdownChanged);
+        }
 #if !UNITY_WEBGL || UNITY_EDITOR
         targetFrameRateDropdown.onValueChanged.AddListener(OnTargetFrameRateDropdownChanged);
 #endif
@@ -71,6 +89,7 @@ public class AppConfigPanel : MonoBehaviour {
 
     private void OnEnable() {
         ApplyTargetFrameRateDropdownVisibility();
+        SyncVolumeSlidersFromConfig();
         SyncGameplayDropdownsFromConfig();
     }
 
@@ -79,6 +98,13 @@ public class AppConfigPanel : MonoBehaviour {
         musicVolumeSlider.Init();
         soundEffectVolumeSlider.Init();
         voiceVolumeSlider.Init();
+    }
+
+    private void SyncVolumeSlidersFromConfig() {
+        masterVolumeSlider?.SyncFromConfig();
+        musicVolumeSlider?.SyncFromConfig();
+        soundEffectVolumeSlider?.SyncFromConfig();
+        voiceVolumeSlider?.SyncFromConfig();
     }
 
     private void InitializeGameplayDropdownOptions() {
@@ -115,6 +141,22 @@ public class AppConfigPanel : MonoBehaviour {
         if (handSortRiichiDragonDropdown != null) {
             handSortRiichiDragonDropdown.ClearOptions();
             handSortRiichiDragonDropdown.AddOptions(new List<string>(TileIdOrder.RiichiDragonOrderOptions));
+        }
+        if (actionButtonColorDropdown != null) {
+            actionButtonColorDropdown.ClearOptions();
+            actionButtonColorDropdown.AddOptions(new List<string> { "关", "开" });
+        }
+        if (gongHuSoundDropdown != null) {
+            gongHuSoundDropdown.ClearOptions();
+            gongHuSoundDropdown.AddOptions(new List<string> { "关", "开" });
+        }
+        if (matchSuccessSoundDropdown != null) {
+            matchSuccessSoundDropdown.ClearOptions();
+            matchSuccessSoundDropdown.AddOptions(new List<string> { "关", "开" });
+        }
+        if (tileOutlinePresetDropdown != null) {
+            tileOutlinePresetDropdown.ClearOptions();
+            tileOutlinePresetDropdown.AddOptions(new List<string>(ConfigManager.TileOutlinePresetLabels));
         }
 #if !UNITY_WEBGL || UNITY_EDITOR
         targetFrameRateDropdown.ClearOptions();
@@ -160,6 +202,22 @@ public class AppConfigPanel : MonoBehaviour {
         if (handSortRiichiDragonDropdown != null) {
             handSortRiichiDragonDropdown.SetValueWithoutNotify(ConfigManager.Instance.HandSortRiichiDragonOrderMode);
             handSortRiichiDragonDropdown.RefreshShownValue();
+        }
+        if (actionButtonColorDropdown != null) {
+            actionButtonColorDropdown.SetValueWithoutNotify(ConfigManager.Instance.ActionButtonColorEnabled ? 1 : 0);
+            actionButtonColorDropdown.RefreshShownValue();
+        }
+        if (gongHuSoundDropdown != null) {
+            gongHuSoundDropdown.SetValueWithoutNotify(ConfigManager.Instance.GongHuSoundEnabled ? 1 : 0);
+            gongHuSoundDropdown.RefreshShownValue();
+        }
+        if (matchSuccessSoundDropdown != null) {
+            matchSuccessSoundDropdown.SetValueWithoutNotify(ConfigManager.Instance.MatchSuccessSoundEnabled ? 1 : 0);
+            matchSuccessSoundDropdown.RefreshShownValue();
+        }
+        if (tileOutlinePresetDropdown != null) {
+            tileOutlinePresetDropdown.SetValueWithoutNotify(ConfigManager.Instance.TileOutlinePreset - 1);
+            tileOutlinePresetDropdown.RefreshShownValue();
         }
 #if !UNITY_WEBGL || UNITY_EDITOR
         int frameRateIndex = System.Array.IndexOf(ConfigManager.TargetFrameRateOptions, ConfigManager.Instance.TargetFrameRate);
@@ -216,6 +274,22 @@ public class AppConfigPanel : MonoBehaviour {
 
     private void OnHandSortRiichiDragonDropdownChanged(int value) {
         ConfigManager.Instance.SetHandSortRiichiDragonOrderMode(value);
+    }
+
+    private void OnActionButtonColorDropdownChanged(int value) {
+        ConfigManager.Instance.SetActionButtonColorEnabled(value == 1);
+    }
+
+    private void OnGongHuSoundDropdownChanged(int value) {
+        ConfigManager.Instance.SetGongHuSoundEnabled(value == 1);
+    }
+
+    private void OnMatchSuccessSoundDropdownChanged(int value) {
+        ConfigManager.Instance.SetMatchSuccessSoundEnabled(value == 1);
+    }
+
+    private void OnTileOutlinePresetDropdownChanged(int value) {
+        ConfigManager.Instance.SetTileOutlinePresetFromDropdown(value);
     }
 
     private void OnLanguageDropdownChanged(int value) {
@@ -382,6 +456,14 @@ public class AppConfigPanel : MonoBehaviour {
             handSortDragonDropdown != null ? handSortDragonDropdown : handSortHonorDropdown,
             "HandSortRiichiDragonRow",
             "日麻排序方式");
+    }
+
+    private void EnsureActionButtonColorDropdown() {
+        actionButtonColorDropdown = CloneDropdownRow(
+            actionButtonColorDropdown,
+            handSortRiichiDragonDropdown != null ? handSortRiichiDragonDropdown : handSortDragonDropdown,
+            "ActionButtonColorRow",
+            "启用按钮颜色");
     }
 
     /// <summary>

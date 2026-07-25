@@ -33,6 +33,7 @@ public class Chinese_Tingpai_Check
 {
     private static readonly HashSet<int> yaojiu = new HashSet<int> { 11, 19, 21, 29, 31, 39, 41, 42, 43, 44, 45, 46, 47 };
     private static readonly HashSet<int> zipai = new HashSet<int> { 41, 42, 43, 44, 45, 46, 47 };
+    private static readonly HashSet<int> hua_tiles = new HashSet<int> { 51, 52, 53, 54, 55, 56, 57, 58 };
 
     private HashSet<int> waiting_tiles;
     private HashSet<int> temp_waiting_tiles;
@@ -303,7 +304,7 @@ public class Chinese_Tingpai_Check
         DebugPrint("处理后的列表: {0}", string.Join(" | ", end_list.Select(x => $"[{string.Join(",", x.hand_tiles)}]")));
         DebugPrint("列表长度: {0}", end_list.Count);
 
-        // 剩余的手牌有五种组成方式 
+        // 剩余的手牌有五种组成方式
         // 1.单吊听牌型(无雀头型)[n] 2.有雀头剩余对子型(对碰)[n,n] 3.剩余两面型[n,n+1] 4.剩余坎张型[n,n+2] 5.无效型[n,m] 特殊情况:组合龙型 complete_step == 14 [temp_waiting_tiles]
         if (end_list.Count > 0)
         {
@@ -314,16 +315,21 @@ public class Chinese_Tingpai_Check
                     string.Join(", ", i.hand_tiles),
                     i.complete_step,
                     string.Join(", ", i.combination_list));
-                
+
                 // 如果有组合龙
                 if (i.combination_list.Any(comb => comb.Contains("z")))
                 {
                     DebugPrint("组合龙型");
-                    // 如果听牌步数为14 没有手牌 说明是组合龙缺张
-                    if (i.complete_step == 14 && i.hand_tiles.Count == 0)
+                    // 不完整组合龙：步数14且手牌空 → 只听缺张
+                    if (i.complete_step == 14 && i.hand_tiles.Count == 0 && temp_waiting_tiles.Count > 0)
                     {
                         waiting_tiles = new HashSet<int>(temp_waiting_tiles);
                         return;
+                    }
+                    // 不完整组合龙未听：不把剥剩手牌当一般型进张
+                    if (temp_waiting_tiles.Count > 0)
+                    {
+                        continue;
                     }
                 }
 
@@ -335,7 +341,7 @@ public class Chinese_Tingpai_Check
                 {
                     int tile1 = i.hand_tiles[0];
                     int tile2 = i.hand_tiles[1];
-                    
+
                     if (tile1 == tile2)
                     {
                         waiting_tiles_list.Add(tile1); // 对碰型
@@ -456,8 +462,8 @@ public class Chinese_Tingpai_Check
             // Ensure tile_id+2 doesn't exceed x9 boundary (19, 29, 39) or reach honor tiles (40+)
             if (tile_id <= 37 && (tile_id % 10) <= 7)
             {
-                if (player_tiles.hand_tiles.Contains(tile_id + 1) && 
-                    player_tiles.hand_tiles.Contains(tile_id + 2) && 
+                if (player_tiles.hand_tiles.Contains(tile_id + 1) &&
+                    player_tiles.hand_tiles.Contains(tile_id + 2) &&
                     tile_id != same_tile_id)
                 {
                     PlayerTilesTingpai temp_list = player_tiles.DeepCopy();
@@ -476,6 +482,11 @@ public class Chinese_Tingpai_Check
     // 外部调用时传参手牌、组合 返回听牌集合
     public HashSet<int> TingpaiCheck(List<int> hand_tile_list, List<string> combination_list)
     {
+        // 手牌含花牌时尚未补花，不应判听
+        if (hand_tile_list.Any(tile => hua_tiles.Contains(tile)))
+        {
+            return new HashSet<int>();
+        }
         PlayerTilesTingpai test_tiles = new PlayerTilesTingpai(hand_tile_list, combination_list, combination_list.Count * 3);
         CheckWaitingTiles(test_tiles);
         // 排除 10 20 30 40这四种集合成员
@@ -504,4 +515,3 @@ public static class GBtingpai
         return checker.TingpaiCheck(hand_tile_list, combination_list);
     }
 }
-

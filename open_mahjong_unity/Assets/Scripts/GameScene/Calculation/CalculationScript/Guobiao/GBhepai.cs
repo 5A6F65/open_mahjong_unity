@@ -161,7 +161,7 @@ public class Chinese_Hepai_Check {
             { "sansesantongshun", new List<string>() },
             { "sansesanjiegao", new List<string>() },
             { "wufanhe", new List<string>() },
-            { "miaoshouhuichun", new List<string>() },
+            { "miaoshouhuichun", new List<string> { "zimo" } },
             { "haidilaoyue", new List<string>() },
             { "gangshangkaihua", new List<string> { "zimo" } },
             { "qiangganghe", new List<string> { "hejuezhang" } },
@@ -350,7 +350,7 @@ public class Chinese_Hepai_Check {
             // 对比返回元组的第一个元素，只返回第一个元素最大的元组
             allow_list = allow_list.OrderByDescending(x => x.Item1).ToList();
             DebugPrint($"允许的番种：{string.Join(",", allow_list.Select(x => x.Item1))}");
-            
+
             // 如果没有任何和牌组合，抛出详细的异常信息（不包装，直接从这一行抛出）
             if (allow_list.Count == 0) {
                 string debug_info = $"HepaiCheck: allow_list为空，无法返回结果。\n" +
@@ -362,7 +362,7 @@ public class Chinese_Hepai_Check {
                     $"way_to_hepai=[{string.Join(",", way_to_hepai)}]";
                 throw new ArgumentOutOfRangeException("allow_list", allow_list.Count, debug_info);
             }
-            
+
             return allow_list[0];
         }
 
@@ -660,8 +660,8 @@ public class Chinese_Hepai_Check {
             if (hand_tiles_list.Count == 0) {
                 return;
             }
-            
-            // 对手牌映射查表 
+
+            // 对手牌映射查表
             if (hand_tiles_list.All(i => duanyao_set.Contains(i))) {
                 player_tiles.fan_list.Add("duanyao"); // 断幺
                 if (hand_tiles_list.All(i => quanzhong_set.Contains(i))) {
@@ -676,11 +676,11 @@ public class Chinese_Hepai_Check {
             var tiao_zipai = new HashSet<int>(tiao_set);
             tiao_zipai.UnionWith(zipai_set);
 
-            if (hand_tiles_list.All(i => wan_zipai.Contains(i)) || 
-                hand_tiles_list.All(i => bing_zipai.Contains(i)) || 
+            if (hand_tiles_list.All(i => wan_zipai.Contains(i)) ||
+                hand_tiles_list.All(i => bing_zipai.Contains(i)) ||
                 hand_tiles_list.All(i => tiao_zipai.Contains(i))) {
-                if (hand_tiles_list.All(i => wan_set.Contains(i)) || 
-                    hand_tiles_list.All(i => bing_set.Contains(i)) || 
+                if (hand_tiles_list.All(i => wan_set.Contains(i)) ||
+                    hand_tiles_list.All(i => bing_set.Contains(i)) ||
                     hand_tiles_list.All(i => tiao_set.Contains(i))) {
                     var temp_tiles_list = new List<int>(hand_tiles_list);
                     DebugPrint("temp_tiles_list", string.Join(",", temp_tiles_list));
@@ -784,7 +784,7 @@ public class Chinese_Hepai_Check {
         private void FanCountCombinationCheck(PlayerTiles player_tiles) {
             if (player_tiles.combination_list.Count == 0)
                 return;
-            
+
             // 对组合单元本身查表
             // 负责判断全带五 全带幺 箭刻 双箭刻 大四喜 小四喜
             if (player_tiles.combination_list.All(i => quandaiwu_set.Contains(i)))
@@ -848,7 +848,7 @@ public class Chinese_Hepai_Check {
         private void FanCountCombinationStrCheck(PlayerTiles player_tiles, string combination_str, List<int> hand_tiles_list) {
             if (string.IsNullOrEmpty(combination_str))
                 return;
-            
+
             // 对组合映射查表
             // 如果有全不靠加一个顺子 或者四个顺子 同时所有手牌是数牌 满足平和
             int s_count = combination_str.Count(c => c == 's' || c == 'S');
@@ -899,7 +899,7 @@ public class Chinese_Hepai_Check {
             var save_dazi_sign = new List<string>();
             var save_kezi_sign = new List<string>();
             var save_quetou_sign = new List<string>();
-            
+
             for (int index = 0; index < combination_str.Length; index++)
             {
                 char tile_id = combination_str[index];
@@ -1145,22 +1145,23 @@ public class Chinese_Hepai_Check {
                 }
 
                 // 根据同色手牌标记的距离判断 连六 老少副
+                // 连六按顺子对计数：仅当两侧起始点各有多余顺子时才复计（如 123123456456 计 2 次，123123456 只计 1 次）
                 foreach (var list in suit_list)
                 {
                     if (list.Count >= 2)
                     {
-                        foreach (var i_str in list)
+                        for (int rank = 1; rank <= 6; rank++)
                         {
-                            int i = int.Parse(i_str);
-                            if (list.Contains((i + 3).ToString()))
-                            {
+                            int pair_count = Math.Min(
+                                list.Count(x => x == rank.ToString()),
+                                list.Count(x => x == (rank + 3).ToString()));
+                            for (int j = 0; j < pair_count; j++)
                                 player_tiles.fan_list.Add("lianliu"); // 连六
-                            }
                         }
                         int min_count = Math.Min(list.Count(x => x == "2"), list.Count(x => x == "8"));
                         if (min_count != 0)
                         {
-                            if (min_count == 2 && player_tiles.fan_list.Contains("qingyise") && 
+                            if (min_count == 2 && player_tiles.fan_list.Contains("qingyise") &&
                                 save_quetou_sign.Count > 0 && int.Parse(save_quetou_sign[0]) % 10 == 5)
                             {
                                 player_tiles.fan_list.Add("yiseshuanglonghui"); // 一色双龙会
@@ -1235,8 +1236,13 @@ public class Chinese_Hepai_Check {
                 {
                     if (all_list.All(i => new[] { "2", "4", "6", "8" }.Contains(i)))
                     {
-                        if (save_quetou_sign.Count > 0 && new[] { "2", "4", "6", "8" }.Contains(save_quetou_sign[0][1].ToString()))
-                            player_tiles.fan_list.Add("quanshuangke"); // 全双刻
+                        if (save_quetou_sign.Count > 0)
+                        {
+                            int quetouId = int.Parse(save_quetou_sign[0]);
+                            int quetouRank = quetouId % 10;
+                            if (quetouId < 40 && (quetouRank == 2 || quetouRank == 4 || quetouRank == 6 || quetouRank == 8))
+                                player_tiles.fan_list.Add("quanshuangke"); // 全双刻
+                        }
                     }
                 }
 
@@ -1366,8 +1372,9 @@ public class Chinese_Hepai_Check {
                         }
                         break;
 
+                    case "last_deal":
                     case "妙手回春":
-                        player_tiles.fan_list.Add("miaoshouhuichun"); // 妙手回春
+                        player_tiles.fan_list.Add("miaoshouhuichun"); // 妙手回春（牌墙空自摸）
                         break;
                     case "杠上开花":
                         player_tiles.fan_list.Add("gangshangkaihua"); // 杠上开花
@@ -1381,14 +1388,15 @@ public class Chinese_Hepai_Check {
                     case "花牌":
                         player_tiles.fan_list.Add("huapai"); // 花牌
                         break;
+                    case "last_cut":
                     case "海底捞月":
-                        player_tiles.fan_list.Add("haidilaoyue"); // 海底捞月
+                        player_tiles.fan_list.Add("haidilaoyue"); // 海底捞月（牌墙空荣和）
                         break;
                     case "点和":
                         DebugPrint(string.Join(",", player_tiles.combination_list));
                         int small_count = combination_str.Count(c => c == 's' || c == 'k' || c == 'g');
-                        if (!string.IsNullOrEmpty(combination_str) && 
-                            combination_str.All(c => !new[] { 'S', 'K', 'G', 'z' }.Contains(c)) && 
+                        if (!string.IsNullOrEmpty(combination_str) &&
+                            combination_str.All(c => !new[] { 'S', 'K', 'G', 'z' }.Contains(c)) &&
                             way_to_hepai.Contains("和单张"))
                         {
                             player_tiles.fan_list.Add("quanqiuren"); // 全求人
@@ -1422,7 +1430,7 @@ public class Chinese_Hepai_Check {
 
         // 番种输出和得分计算
         private Tuple<int, List<string>> FanCountOutput(PlayerTiles player_tiles, string combination_str, bool zimo_or_not, List<string> way_to_hepai) {
-            
+
             // 无番和：排除花牌后，若没有剩余番或剩余番番值均为 0，则添加无番和
             var remaining = player_tiles.fan_list.Where(f => f != "huapai").ToList();
             if (remaining.Count == 0 || remaining.All(f => _countModelDict.GetValueOrDefault(f, 0) == 0))
@@ -1431,7 +1439,7 @@ public class Chinese_Hepai_Check {
             // 根据规定原则排除阻挡番种
             var need_to_remove = new List<string>();
             int max_yaojiuke_count = 0;
-            
+
             foreach (var fan in player_tiles.fan_list)
             {
                 if (repel_model_dict.ContainsKey(fan))
@@ -1478,7 +1486,7 @@ public class Chinese_Hepai_Check {
                 bool has_quanfengke = player_tiles.fan_list.Contains("quanfengke");
                 bool has_menfengke = player_tiles.fan_list.Contains("menfengke");
                 bool menfeng_equals_changfeng = way_to_hepai.Contains("门风圈风相同");
-                
+
                 if (has_quanfengke) {
                     need_to_remove.Add("yaojiuke");
                 }
@@ -1619,7 +1627,7 @@ public class Chinese_Hepai_Check {
         // 主番种计算方法
         public Tuple<int, List<string>> FanCount(PlayerTiles player_tiles, int get_tile, List<string> way_to_hepai) {
             // 判断前处理 处理get_tile
-            bool zimo_or_not = way_to_hepai.Any(i => new[] { "妙手回春", "自摸", "杠上开花" }.Contains(i));
+            bool zimo_or_not = way_to_hepai.Any(i => new[] { "last_deal", "妙手回春", "自摸", "杠上开花" }.Contains(i));
 
             if (!zimo_or_not)
             {
@@ -1653,7 +1661,7 @@ public class Chinese_Hepai_Check {
             // 判断前处理 建立手牌映射和组合映射
             var hand_tiles_list = new List<int>();
             string combination_str = "";
-            
+
             if (player_tiles.fan_list.Any(f => new[] { "qiduizi", "lianqidui" }.Contains(f)))
                 hand_tiles_list = new List<int>(player_tiles.hand_tiles);
             else if (player_tiles.fan_list.Any(f => new[] { "quanbukao", "qixingbukao" }.Contains(f)))

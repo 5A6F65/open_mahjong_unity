@@ -7,8 +7,12 @@ public partial class NormalGameStateManager {
     public void InitializeGame(bool success, string message, GameInfo gameInfo){
         ClearPendingCuoheContinue();
         ClearPendingSichuanContinue();
-        string incomingGamestateId = gameInfo?.gamestate_id;
-        if (string.IsNullOrEmpty(gamestateId) || gamestateId != incomingGamestateId) {
+        lastAskHandPlayerIndex = -1;
+        // 新对局（gamestate_id 变化）才清空本地结算快照；同一场对局的下一局 game_start 不应清空，
+        // 否则会抹掉已累积的主番快照（国标每局都会广播 game_start），导致计分板主番列整列变 —。
+        // 重连时若本地快照行数与服务端 score_history 不一致，仍清空以免与分值行错位。
+        bool isNewMatch = string.IsNullOrEmpty(gamestateId) || gamestateId != gameInfo.gamestate_id;
+        if (isNewMatch) {
             ClearRoundSettlementHistory();
         }
         if (!IsRealtimeSpectator) {
@@ -18,15 +22,15 @@ public partial class NormalGameStateManager {
 
         gamestateId = gameInfo.gamestate_id;
         // 0.切换窗口
-        MatchStateManager.Instance?.StopQueueing();
-        MatchNetworkManager.Instance?.ResetMatchLock();
+        MatchStateManager.Instance.StopQueueing();
+        MatchNetworkManager.Instance.ResetMatchLock();
         MatchQueueingPanel.Instance?.HideImmediately();
         MatchFoundedPanel.Instance?.StopCountdownAndHide();
         WindowsManager.Instance.SwitchWindow("game"); // 切换到游戏场景
 
         Game3DManager.Instance.Clear3DTile(); // 清空3D手牌
 
-        InitializeSetInfo(gameInfo); // 初始化对局数据
+        InitializeSetInfo(gameInfo, isNewMatch); // 初始化对局数据
         GameCanvas.Instance.InitializeUIInfo(gameInfo,indexToPosition); // 初始化面板信息
         BoardCanvas.Instance.InitializeBoardInfo(gameInfo,indexToPosition); // 初始化桌面信息
         RestoreSichuanDingque(gameInfo); // 四川：重连/进局中时恢复各家定缺标记
@@ -34,7 +38,7 @@ public partial class NormalGameStateManager {
         // 获取自己的手牌信息（从 PlayerInfo 中获取）
         PlayerInfo selfPlayerInfo = GetSelfPlayerInfo(gameInfo);
         int[] selfHandTilesArray = selfPlayerInfo.hand_tiles;
-        
+
         // 初始化手牌区域
         GameCanvas.Instance.ChangeHandCards("InitHandCards",0,selfHandTilesArray,null);
 
@@ -65,8 +69,11 @@ public partial class NormalGameStateManager {
 
         IsGameActive = true;
         IsSelfActionRequired = false;
-        TipsContainer.Instance?.ResetRyuukyokuTenpaiChoiceForRound();
-        TipsContainer.Instance?.HideRyuukyokuTenpaiChoice();
+        TipsContainer.Instance.ResetRyuukyokuTenpaiChoiceForRound();
+        TipsContainer.Instance.HideRyuukyokuTenpaiChoice();
+        if (IsRealtimeSpectator && tips && player_to_info.TryGetValue("self", out PlayerInfoClass selfInfo)) {
+            TipsBlock.Instance.ShowTipsBlock(selfHandTiles, selfInfo.combination_tiles ?? new List<string>());
+        }
     }
 
     private void RestoreRiichiTenbous(GameInfo gameInfo){
@@ -88,7 +95,7 @@ public partial class NormalGameStateManager {
         foreach (var player in gameInfo.players_info){
             if (!indexToPosition.ContainsKey(player.player_index)) continue;
             string position = indexToPosition[player.player_index];
-            
+
             // 1. 生成弃牌（同时复原立直横置标记，重连/初始化时与服务器一致）
             if (player.discard_tiles != null && player.discard_tiles.Length > 0){
                 bool[] flags = player.discard_riichi_flags;
@@ -99,28 +106,28 @@ public partial class NormalGameStateManager {
                     Debug.Log($"生成弃牌: {tileId} horizontal={horizontal}");
                 }
             }
-            
+
             // 2. 生成花牌
             if (player.huapai_list != null && player.huapai_list.Length > 0){
                 foreach (int tileId in player.huapai_list){
                     Game3DManager.Instance.Change3DTile("SetBuhuacardWithoutAnimation", tileId, 0, position, false, null);
                 }
             }
-            
+
             // 3. 生成副露（组合牌）
             // 直接遍历副露列表和掩码，调用 ActionAnimation 显示
             // 手牌数量已经反映了副露消耗，不需要再做移除操作
             if (player.combination_tiles != null && player.combination_tiles.Length > 0 &&
                 player.combination_mask != null && player.combination_mask.Length > 0){
-                
+
                 // 遍历每个副露组合，直接使用二维数组中的每个子数组
                 for (int i = 0; i < player.combination_tiles.Length && i < player.combination_mask.Length; i++){
                     string combinationStr = player.combination_tiles[i];
                     if (string.IsNullOrEmpty(combinationStr) || combinationStr.Length < 2) continue;
-                    
+
                     int[] combinationMask = player.combination_mask[i];
                     if (combinationMask == null || combinationMask.Length == 0) continue;
-                    
+
                     // 统计掩码中加杠牌（值为3）的数量
                     int jiagangCount = 0;
                     foreach (int value in combinationMask){
@@ -128,7 +135,7 @@ public partial class NormalGameStateManager {
                             jiagangCount++;
                         }
                     }
-                    
+
                     // 如果 combination_tiles 的字符串有 "k"（刻子/碰），传入 "peng"
                     if (combinationStr.Contains("k")){
                         Game3DManager.Instance.StartCoroutine(Game3DManager.Instance.ActionAnimationCoroutine(position, "peng", combinationMask, false));
@@ -150,9 +157,10 @@ public partial class NormalGameStateManager {
     }
 
     // 设置游戏信息
-    private void InitializeSetInfo(GameInfo gameInfo){
+    private void InitializeSetInfo(GameInfo gameInfo, bool isNewMatch){
         // 清空操作列表
         allowActionList = new List<string>();
+        selfForcedCutTiles.Clear();
         // 清空弃牌列表
         player_to_info["self"].discard_tiles = new List<int>();
         player_to_info["left"].discard_tiles = new List<int>();
@@ -220,7 +228,7 @@ public partial class NormalGameStateManager {
         remainTiles = gameInfo.tile_count; // 存储剩余牌数
         currentRound = gameInfo.current_round; // 存储当前轮数
         maxRound = gameInfo.max_round;
-        
+
         // 获取自己的手牌信息（从 PlayerInfo 中获取）
         PlayerInfo selfPlayerInfo = GetSelfPlayerInfo(gameInfo);
         if (selfPlayerInfo != null && selfPlayerInfo.hand_tiles != null){
@@ -243,6 +251,9 @@ public partial class NormalGameStateManager {
         hepaiWay = gameInfo.hepai_way ?? "multi_ron";
         redDora = gameInfo.red_dora ?? false;
         dealerIndex = gameInfo.dealer_index ?? 0;
+        changshaBaseScoreNoDealer = gameInfo.base_score_no_dealer ?? false;
+        changshaSmallHuScore = Mathf.Max(gameInfo.small_hu_score ?? 2, 1);
+        changshaBigHuScore = Mathf.Max(gameInfo.big_hu_score ?? 8, 1);
         if (isOpenCuoHe){
             Debug.Log("开启错和");
         }
@@ -296,6 +307,7 @@ public partial class NormalGameStateManager {
                 player_to_info["self"].voice_used = player.voice_used; // 存储使用的音色ID
                 player_to_info["self"].score_history = player.score_history.ToList(); // 存储分数历史变化列表
                 player_to_info["self"].round_number_history = player.round_number_history != null ? player.round_number_history.ToList() : new List<int>(); // 存储每手对应局数
+                ScoreHistorySettlementHelper.AlignRoundNumberHistory(player_to_info["self"].score_history, player_to_info["self"].round_number_history);
                 player_to_info["self"].original_player_index = player.original_player_index; // 存储原始玩家索引
                 player_to_info["self"].tag_list = player.tag_list; // 存储标签列表
             } else if (indexToPosition[player.player_index] == "right") {
@@ -315,6 +327,7 @@ public partial class NormalGameStateManager {
                 player_to_info["right"].voice_used = player.voice_used; // 存储使用的音色ID
                 player_to_info["right"].score_history = player.score_history.ToList(); // 存储分数历史变化列表
                 player_to_info["right"].round_number_history = player.round_number_history != null ? player.round_number_history.ToList() : new List<int>(); // 存储每手对应局数
+                ScoreHistorySettlementHelper.AlignRoundNumberHistory(player_to_info["right"].score_history, player_to_info["right"].round_number_history);
                 player_to_info["right"].original_player_index = player.original_player_index; // 存储原始玩家索引
                 player_to_info["right"].tag_list = player.tag_list; // 存储标签列表
             } else if (indexToPosition[player.player_index] == "top") {
@@ -334,6 +347,7 @@ public partial class NormalGameStateManager {
                 player_to_info["top"].voice_used = player.voice_used; // 存储使用的音色ID
                 player_to_info["top"].score_history = player.score_history.ToList(); // 存储分数历史变化列表
                 player_to_info["top"].round_number_history = player.round_number_history != null ? player.round_number_history.ToList() : new List<int>(); // 存储每手对应局数
+                ScoreHistorySettlementHelper.AlignRoundNumberHistory(player_to_info["top"].score_history, player_to_info["top"].round_number_history);
                 player_to_info["top"].original_player_index = player.original_player_index; // 存储原始玩家索引
                 player_to_info["top"].tag_list = player.tag_list; // 存储标签列表
             } else if (indexToPosition[player.player_index] == "left") {
@@ -353,8 +367,21 @@ public partial class NormalGameStateManager {
                 player_to_info["left"].voice_used = player.voice_used; // 存储使用的音色ID
                 player_to_info["left"].score_history = player.score_history.ToList(); // 存储分数历史变化列表
                 player_to_info["left"].round_number_history = player.round_number_history != null ? player.round_number_history.ToList() : new List<int>(); // 存储每手对应局数
+                ScoreHistorySettlementHelper.AlignRoundNumberHistory(player_to_info["left"].score_history, player_to_info["left"].round_number_history);
                 player_to_info["left"].original_player_index = player.original_player_index; // 存储原始玩家索引
                 player_to_info["left"].tag_list = player.tag_list; // 存储标签列表
+            }
+        }
+
+        // 重连兜底：同一对局重连时，若本地快照行数与服务端恢复的 score_history 不一致，清空以免错位。
+        // 正常下一局 game_start 时两者同步增长，不会进入此分支，主番快照得以保留。
+        if (!isNewMatch) {
+            int scoreRows = 0;
+            foreach (var info in player_to_info.Values) {
+                if (info.score_history != null) scoreRows = Mathf.Max(scoreRows, info.score_history.Count);
+            }
+            if (roundSettlementHistory.Count != scoreRows) {
+                ClearRoundSettlementHistory();
             }
         }
     }

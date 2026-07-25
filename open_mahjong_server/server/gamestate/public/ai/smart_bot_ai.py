@@ -12,6 +12,11 @@ from .smart_bot_logic import (
 
 logger = logging.getLogger(__name__)
 
+_BOT_DELAY = 0.5
+
+# 荣和/抢杠：国标/古典等为 hu_first/second/third；四川血战为 hu
+_RON_HU_ACTIONS = ("hu", "hu_first", "hu_second", "hu_third")
+
 
 async def _wait_until_actionable(game_state, player_index: int, attempts: int = 200, interval: float = 0.01) -> bool:
     """等待 wait_action 完成 waiting_players_list 建立（清空队列/事件之后）再提交操作。
@@ -22,8 +27,11 @@ async def _wait_until_actionable(game_state, player_index: int, attempts: int = 
     机器人不再重试，最终只能等到超时（表现为加杠/鸣牌后卡住）。
     与摸切机器人 _submit_pass_when_ready 保持一致，轮询等待后再提交。
     """
+    expected_tick = getattr(game_state, "server_action_tick", None)
     for _ in range(attempts):
-        if player_index in getattr(game_state, "waiting_players_list", []):
+        waiting_tick = getattr(game_state, "_waiting_action_tick", None)
+        correct_round = waiting_tick is None or waiting_tick == expected_tick
+        if correct_round and player_index in getattr(game_state, "waiting_players_list", []):
             return True
         await asyncio.sleep(interval)
     return False
@@ -43,15 +51,26 @@ async def smart_bot_action(game_state, player_index: int, action_list: list, gam
     try:
         current_player = game_state.player_list[player_index]
 
+        if game_status in ("waiting_initial_hu", "waiting_sea_bottom"):
+            if "pass" in action_list and await _wait_until_actionable(game_state, player_index):
+                await get_ai_action(game_state, player_index, "pass", None, None, None, None)
+            return
+
         if game_status == "waiting_hand_action":
-            await asyncio.sleep(0.5)
-            # 摸牌后手牌操作：和牌 > 暗杠/加杠 > 切牌
+            await asyncio.sleep(_BOT_DELAY)
+            if not await _wait_until_actionable(game_state, player_index):
+                logger.warning(f"牌效AI {player_index} ({current_player.username}) 手牌询问未进入 waiting_players_list，放弃操作")
+                return
             await _handle_hand_action(game_state, player_index, action_list, current_player)
             return
 
         elif game_status == "onlycut_after_action":
-            await asyncio.sleep(0.5)
-            # 吃碰后手牌操作：和牌 > 切牌（不可暗杠/加杠）
+            cp = bool(getattr(game_state, "claim_protection", False))
+            from ..claim_protection import get_meld_post_gap
+            await asyncio.sleep(_BOT_DELAY + (get_meld_post_gap(game_state) if cp else 0.0))
+            if not await _wait_until_actionable(game_state, player_index):
+                logger.warning(f"牌效AI {player_index} ({current_player.username}) 鸣牌后未进入 waiting_players_list，放弃操作")
+                return
             await _handle_hand_action(game_state, player_index, action_list, current_player)
             return
 
@@ -66,7 +85,10 @@ async def smart_bot_action(game_state, player_index: int, action_list: list, gam
             return
 
         elif game_status == "waiting_buhua_round":
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(_BOT_DELAY)
+            if not await _wait_until_actionable(game_state, player_index):
+                logger.warning(f"牌效AI {player_index} ({current_player.username}) 补花轮未进入 waiting_players_list，放弃操作")
+                return
             # 补花轮询问：能补花就补花，有国士和牌就和，否则pass
             await _handle_buhua_round(game_state, player_index, action_list, current_player)
             return
@@ -96,6 +118,32 @@ async def _handle_hand_action(game_state, player_index, action_list, player):
     combs = getattr(player, 'combination_tiles', [])
     meld_count = count_melds(combs)
     visible = count_visible_tiles(game_state)
+
+    if "buzhang" in action_list:
+        for c in combs:
+            if c.startswith("k"):
+                try:
+                    ktile = int(c[1:])
+                except ValueError:
+                    continue
+                if ktile in hand:
+                    test_hand = hand[:]
+                    test_hand.remove(ktile)
+                    base_score = evaluate_hand(hand, meld_count, visible)
+                    buzhang_score = evaluate_hand(test_hand, meld_count, visible)
+                    if buzhang_score >= base_score:
+                        logger.info(f"牌效AI {player_index} ({player.username}) 选择 buzhang, tile={ktile}")
+                        await get_ai_action(game_state, player_index, "buzhang", None, None, None, ktile)
+                        return
+        for tile in set(hand):
+            if hand.count(tile) >= 4:
+                test_hand = [t for t in hand if t != tile]
+                base_score = evaluate_hand(hand, meld_count, visible)
+                buzhang_score = evaluate_hand(test_hand, meld_count + 1, visible)
+                if buzhang_score >= base_score:
+                    logger.info(f"牌效AI {player_index} ({player.username}) 选择 buzhang, tile={tile}")
+                    await get_ai_action(game_state, player_index, "buzhang", None, None, None, tile)
+                    return
 
     # 评估暗杠：暗杠后手牌不变差则执行（定缺花色不可暗杠）
     if "angang" in action_list:
@@ -144,15 +192,14 @@ async def _handle_hand_action(game_state, player_index, action_list, player):
 
 async def _handle_after_cut(game_state, player_index, action_list, player):
     """他家切牌后的响应阶段：和牌 > 碰/吃/明杠评估 > pass"""
-    # 等待 wait_action 建立 waiting_players_list 后再提交，避免操作被清空丢弃导致卡住
     if not await _wait_until_actionable(game_state, player_index):
         logger.warning(f"牌效AI {player_index} ({player.username}) 切牌后询问未进入 waiting_players_list，放弃操作")
         return
     # 能和且满足起和番则和（避免错和）
-    for hu_action in ("hu_first", "hu_second", "hu_third"):
+    for hu_action in _RON_HU_ACTIONS:
         if hu_action in action_list and should_accept_hu(game_state, player_index, hu_action):
             logger.info(f"牌效AI {player_index} ({player.username}) 选择 {hu_action}")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(_BOT_DELAY)
             await get_ai_action(game_state, player_index, hu_action, None, None, None, None)
             return
 
@@ -223,7 +270,7 @@ async def _handle_after_cut(game_state, player_index, action_list, player):
 
     logger.info(f"牌效AI {player_index} ({player.username}) 选择 {best_action} (score={best_action_score})")
     if best_action != "pass":
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(_BOT_DELAY)
     await get_ai_action(game_state, player_index, best_action, None, None, None, None)
 
 
@@ -234,10 +281,10 @@ async def _handle_qianggang(game_state, player_index, action_list, player):
         logger.warning(f"牌效AI {player_index} ({player.username}) 抢杠询问未进入 waiting_players_list，放弃操作")
         return
     # 抢杠和（满足起和番才和）
-    for hu_action in ("hu_first", "hu_second", "hu_third"):
+    for hu_action in _RON_HU_ACTIONS:
         if hu_action in action_list and should_accept_hu(game_state, player_index, hu_action):
             logger.info(f"牌效AI {player_index} ({player.username}) 选择 {hu_action}（抢杠和）")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(_BOT_DELAY)
             await get_ai_action(game_state, player_index, hu_action, None, None, None, None)
             return
     # 没有和牌选项则pass

@@ -79,18 +79,18 @@ public static class ScoreHistoryRecordSettlementExtractor {
         foreach (List<string> tick in round.actionTicks) {
             if (tick == null || tick.Count == 0) continue;
             string action = tick[0];
-            if (action == "ask_hand" || action == "ask_other" || action == "end" || action == "dora" || action == "riichi") {
+            if (action == "ask_hand" || action == "ask_other" || action == "ca" || action == "end" || action == "dora" || action == "riichi") {
                 continue;
             }
 
-            // 开局补花阶段：与 GameRecordManager.InferAndMarkStartIndex 对齐，不推进主巡目
+            // 开局补花阶段：与 GameRecordManager.EnsureRecordMainPhaseStarted 对齐，不推进主巡目
             if (action == "bh" || action == "bd") {
-                int flowerActingIndex = action == "bh" && tick.Count >= 3
-                    ? ParseInt(tick, 2)
-                    : currentPlayerIndex;
+                int flowerActingIndex = GameRecordJsonDecoder.ResolveRecordActingPlayerIndex(
+                    tick, action, currentPlayerIndex);
                 SimPlayer flowerActor = players[flowerActingIndex];
                 if (action == "bh") {
-                    RemoveOneTile(flowerActor.tileList, ParseInt(tick, 1));
+                    bool isMoBuhua = GameRecordJsonDecoder.ParseBuhuaMoFlag(tick);
+                    RemoveTileForBuhua(flowerActor.tileList, ParseInt(tick, 1), isMoBuhua);
                 } else {
                     flowerActor.tileList.Add(ParseInt(tick, 1));
                 }
@@ -165,6 +165,8 @@ public static class ScoreHistoryRecordSettlementExtractor {
                 case "hu_second":
                 case "hu_third": {
                     if (isSichuanBlood && IsDeferredSichuanHuTick(tick)) break;
+                    // 古典牌谱顺序为 shuhewei → hu；数和尾已占一行，勿重复追加。
+                    if (subRule != null && subRule.StartsWith("classical") && lastRow != null) break;
                     if (isSichuan) {
                         int[] scoreChanges = ParseScoreChanges(tick, 4);
                         lastRow = new RecordScoreRow {
@@ -175,7 +177,7 @@ public static class ScoreHistoryRecordSettlementExtractor {
                         output.Add(lastRow);
                         break;
                     }
-                    RoundSettlementSnapshot snap = BuildHuSnapshot(tick, action, subRule, round, actingPlayerIndex, players, lastWinnableTileId, action != "hu_self", gameTitle);
+                    RoundSettlementSnapshot snap = BuildHuSnapshot(tick, action, subRule, round, actingPlayerIndex, players, lastWinnableTileId, gameTitle);
                     lastRow = new RecordScoreRow {
                         snapshot = snap,
                         scoreChangesByOriginal = GameRecordJsonDecoder.ConvertPlayerIndexScoreChangesToOriginal(ParseScoreChanges(tick, 4), round.seats),
@@ -256,6 +258,8 @@ public static class ScoreHistoryRecordSettlementExtractor {
                         output.Add(lastRow);
                         break;
                     }
+                    // 古典流局：shuhewei 已记一行，后续 liuju tick 勿重复。
+                    if (subRule != null && subRule.StartsWith("classical") && lastRow != null) break;
                     lastRow = new RecordScoreRow {
                         snapshot = new RoundSettlementSnapshot { subRule = subRule, isLiuju = true, hasWin = false, huClass = action },
                         scoreChangesByOriginal = new int[4],
@@ -268,8 +272,8 @@ public static class ScoreHistoryRecordSettlementExtractor {
         }
     }
 
+    /// <summary>血战中途和牌：score_changes 全 0 表示分数延至终局结算（hu_score 仍可能 &gt; 0）。</summary>
     private static bool IsDeferredSichuanHuTick(List<string> tick) {
-        if (ParseInt(tick, 2) != 0) return false;
         int[] scoreChanges = ParseScoreChanges(tick, 4);
         if (scoreChanges == null) return true;
         foreach (int change in scoreChanges) {
@@ -318,7 +322,6 @@ public static class ScoreHistoryRecordSettlementExtractor {
         int hepaiPlayerIndex,
         SimPlayer[] players,
         int lastDiscardTileId,
-        bool isRon,
         Dictionary<string, object> gameTitle) {
         string[] huFan = ParseFanList(tick, 3);
         int huScore = ParseInt(tick, 2);
@@ -330,11 +333,9 @@ public static class ScoreHistoryRecordSettlementExtractor {
         }
 
         SimPlayer huPlayer = players[hepaiPlayerIndex];
-        string rule = gameTitle != null && gameTitle.TryGetValue("rule", out object ruleObj) && ruleObj != null
-            ? ruleObj.ToString() : subRule;
-        RecordHuHandBuilder.TryParseHepaiTile(tick, rule, out int parsedHepaiTile);
-        int[] hand = RecordHuHandBuilder.BuildDisplayHand(
-            huPlayer.tileList, huClass, parsedHepaiTile, lastDiscardTileId);
+        string rule = ResolveRecordRule(gameTitle, subRule);
+        RecordHuHandBuilder.TryParseHepaiTile(tick, rule, out int hepaiTile);
+        int[] hand = BuildScoreboardHuHand(huPlayer.tileList, huClass, hepaiTile, lastDiscardTileId);
 
         int winnerDelta = 0;
         int[] scoreChanges = ParseScoreChanges(tick, 4);
@@ -375,9 +376,8 @@ public static class ScoreHistoryRecordSettlementExtractor {
         string[] yaku = tick.Count > 5 ? ParseFanList(tick, 5) : Array.Empty<string>();
 
         SimPlayer huPlayer = players[hepaiPlayerIndex];
-        RecordHuHandBuilder.TryParseHepaiTile(tick, subRule, out int parsedHepaiTile);
-        int[] hand = RecordHuHandBuilder.BuildDisplayHand(
-            huPlayer.tileList, huClass, parsedHepaiTile, lastDiscardTileId);
+        RecordHuHandBuilder.TryParseHepaiTile(tick, subRule, out int hepaiTile);
+        int[] hand = BuildScoreboardHuHand(huPlayer.tileList, huClass, hepaiTile, lastDiscardTileId);
 
         int winnerDelta = 0;
         int[] scoreChanges = tick.Count > 6 ? ParseScoreChanges(tick, 6) : null;
@@ -430,21 +430,20 @@ public static class ScoreHistoryRecordSettlementExtractor {
 
         SimPlayer huPlayer = players[hepaiIndex];
         string huClass = string.IsNullOrEmpty(target.huClass) ? "hu_self" : target.huClass;
-        target.hepaiPlayerHand = RecordHuHandBuilder.BuildDisplayHand(
-            huPlayer.tileList, huClass, 0, lastDiscardTileId);
+        target.hepaiPlayerHand = BuildScoreboardHuHand(huPlayer.tileList, huClass, 0, lastDiscardTileId);
         target.combinationMask = CloneMasks(huPlayer.combinationMasks);
     }
 
     /// <summary>与 GameRecordManager.NextAction 一致：摸切/补花/副露/和牌等 tick 自带行动者，其余沿用当前巡目玩家。</summary>
     private static int ResolveActingPlayerIndex(string action, List<string> tick, int currentPlayerIndex) {
-        if (action == "bh" && tick.Count >= 3) return ParseInt(tick, 2);
-        if ((action == "cl" || action == "cm" || action == "cr" || action == "p" || action == "g") && tick.Count >= 3) {
-            return ParseInt(tick, 2);
+        return GameRecordJsonDecoder.ResolveRecordActingPlayerIndex(tick, action, currentPlayerIndex);
+    }
+
+    private static string ResolveRecordRule(Dictionary<string, object> gameTitle, string subRule) {
+        if (gameTitle != null && gameTitle.TryGetValue("rule", out object ruleObj) && ruleObj != null) {
+            return ruleObj.ToString();
         }
-        if ((action == "hu_self" || action == "hu_first" || action == "hu_second" || action == "hu_third" || action == "hu_riichi") && tick.Count >= 2) {
-            return ParseInt(tick, 1);
-        }
-        return currentPlayerIndex;
+        return subRule;
     }
 
     private static string ResolveUsernameForSeat(int seatIndex, Round round, Dictionary<string, object> gameTitle) {
@@ -547,6 +546,15 @@ public static class ScoreHistoryRecordSettlementExtractor {
         if (idx >= 0) tileList.RemoveAt(idx);
     }
 
+    private static void RemoveTileForBuhua(List<int> tileList, int tileId, bool isMoBuhua) {
+        if (tileList.Count == 0) return;
+        if (isMoBuhua && tileList[tileList.Count - 1] == tileId) {
+            tileList.RemoveAt(tileList.Count - 1);
+            return;
+        }
+        RemoveOneTile(tileList, tileId);
+    }
+
     private static void RemoveTileForCut(List<int> tileList, int tileId, bool isMoqie) {
         if (tileList.Count == 0) return;
         if (isMoqie && tileList[tileList.Count - 1] == tileId) {
@@ -598,5 +606,29 @@ public static class ScoreHistoryRecordSettlementExtractor {
         if (otherIndex == 0) return "right";
         if (otherIndex == 1) return "top";
         return "left";
+    }
+
+    /// <summary>计分板：自摸原样；荣和仅追加铳张（与服务器 hand.append 一致，不删摸入张、不跳过同色追加）。</summary>
+    private static int[] BuildScoreboardHuHand(
+        IReadOnlyList<int> closedHand,
+        string huClass,
+        int hepaiTile,
+        int lastWinnableTileId) {
+        if (closedHand == null || closedHand.Count == 0) return Array.Empty<int>();
+        if (huClass == "hu_self") {
+            var self = new int[closedHand.Count];
+            for (int i = 0; i < closedHand.Count; i++) self[i] = closedHand[i];
+            return self;
+        }
+        int winTile = hepaiTile >= 10 ? hepaiTile : (lastWinnableTileId >= 10 ? lastWinnableTileId : 0);
+        if (winTile < 10) {
+            var fallback = new int[closedHand.Count];
+            for (int i = 0; i < closedHand.Count; i++) fallback[i] = closedHand[i];
+            return fallback;
+        }
+        var hand = new int[closedHand.Count + 1];
+        for (int i = 0; i < closedHand.Count; i++) hand[i] = closedHand[i];
+        hand[closedHand.Count] = winTile;
+        return hand;
     }
 }

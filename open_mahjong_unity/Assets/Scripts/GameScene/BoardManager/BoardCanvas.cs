@@ -13,7 +13,7 @@ public partial class BoardCanvas : MonoBehaviour {
     [Header("玩家信息")]
     [SerializeField] private TMP_Text player_self_score;       // 玩家分数文本
     [SerializeField] private TMP_Text player_self_index;       // 玩家索引文本
-    [SerializeField] private Image player_self_current_image;    // 玩家回合标记    
+    [SerializeField] private Image player_self_current_image;    // 玩家回合标记
 
     [SerializeField] private TMP_Text player_left_score;         // 玩家分数文本
     [SerializeField] private TMP_Text player_left_index;         // 玩家索引文本
@@ -51,6 +51,10 @@ public partial class BoardCanvas : MonoBehaviour {
     }
 
     public void InitializeBoardInfo(GameInfo gameInfo,Dictionary<int, string> indexToPosition){
+        // 换位/新局会关掉黄条但不清缓存；同座首行动会因 shownCurrentPlayer 早退导致指示不亮
+        CoroutineManager.Instance.StopNamed(CoroutineKeys.BoardCurrentFlash);
+        shownCurrentPlayer = null;
+
         // 初始化玩家信息
         // 设置玩家位置、分数、索引(东南西北)、回合标记
         foreach (var player in gameInfo.players_info){
@@ -74,7 +78,7 @@ public partial class BoardCanvas : MonoBehaviour {
         }
 
         // 设置剩余牌数
-        remiansTilesText.text = $"余:{gameInfo.tile_count}"; 
+        remiansTilesText.text = $"余:{gameInfo.tile_count}";
 
         // 设置当前回合（按 room_rule 判断）
         string roomType = gameInfo.room_rule;
@@ -89,6 +93,10 @@ public partial class BoardCanvas : MonoBehaviour {
             roundMap = RoundTextDictionary.CurrentRoundTextClassical;
         } else if (roomType == "sichuan") {
             roundMap = RoundTextDictionary.CurrentRoundTextSichuan;
+        } else if (roomType == "changsha") {
+            roundMap = RoundTextDictionary.CurrentRoundTextChangsha;
+        } else if (roomType == "jiandan") {
+            roundMap = RoundTextDictionary.CurrentRoundTextJiandan;
         }
 
         if (roundMap != null && roundMap.TryGetValue(gameInfo.current_round, out string currentRoundStr)) {
@@ -107,6 +115,9 @@ public partial class BoardCanvas : MonoBehaviour {
         int currentRound,
         int remainTiles
     ) {
+        CoroutineManager.Instance.StopNamed(CoroutineKeys.BoardCurrentFlash);
+        shownCurrentPlayer = null;
+
         foreach (var recordPlayer in recordPlayerList) {
             if (!indexToPosition.TryGetValue(recordPlayer.playerIndex, out string position)) {
                 continue;
@@ -150,6 +161,10 @@ public partial class BoardCanvas : MonoBehaviour {
             roundMap = RoundTextDictionary.CurrentRoundTextClassical;
         } else if (roomType == "sichuan") {
             roundMap = RoundTextDictionary.CurrentRoundTextSichuan;
+        } else if (roomType == "changsha") {
+            roundMap = RoundTextDictionary.CurrentRoundTextChangsha;
+        } else if (roomType == "jiandan") {
+            roundMap = RoundTextDictionary.CurrentRoundTextJiandan;
         }
 
         if (roundMap != null && roundMap.TryGetValue(currentRound, out string currentRoundStr)) {
@@ -263,7 +278,7 @@ public partial class BoardCanvas : MonoBehaviour {
     public void UpdatePlayerScores(Dictionary<int, int> player_to_score, Dictionary<int, string> indexToPosition) {
         // 如果正在显示分差，先恢复到基准分数
         if (isShowingScoreDifference) {
-            CoroutineManager.Instance?.StopNamed(CoroutineKeys.BoardScoreDifference);
+            CoroutineManager.Instance.StopNamed(CoroutineKeys.BoardScoreDifference);
             RestoreBaselineScores();
             isShowingScoreDifference = false;
         }
@@ -303,5 +318,3 @@ public partial class BoardCanvas : MonoBehaviour {
         }
     }
 }
-
-

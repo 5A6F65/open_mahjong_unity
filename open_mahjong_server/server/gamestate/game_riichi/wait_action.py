@@ -83,6 +83,18 @@ def _is_valid_cut_action(self, player_index: int, action_data: dict) -> bool:
     return True
 
 
+def _ron_eligible_indexes_from_action_dict(action_dict) -> list[int]:
+    """从 action_dict 提取本巡可荣和/抢杠和的座位。
+
+    必须在等待循环清空各家 action_dict 之前快照：玩家 pass 后自身列表已空，
+    若事后再扫会漏掉立直振听/同巡振听。
+    """
+    return [
+        pi for pi, acts in action_dict.items()
+        if any(a in RON_HU_ACTIONS for a in acts)
+    ]
+
+
 async def wait_action(self):
     self.waiting_players_list = []
     self._pending_ron_claims = {}
@@ -120,6 +132,11 @@ async def wait_action(self):
             clear_draw_slot(cur_player)
             await _execute_cut(self, cur, forced_tile, is_moqie, None, is_riichi=False, already_removed=True)
             return
+
+    # 切牌后/抢杠询问：在等待循环清空 action_dict 前快照可荣和座位，供放过振听使用。
+    ron_eligible_snapshot: list[int] = []
+    if self.game_status in ("waiting_action_after_cut", "waiting_action_qianggang"):
+        ron_eligible_snapshot = _ron_eligible_indexes_from_action_dict(self.action_dict)
 
     for player_index, action_list in self.action_dict.items():
         if action_list:
@@ -226,8 +243,8 @@ async def wait_action(self):
                                               combination_mask=mask, combination_target=f"G{normal_angang}",
                                               is_mo_gang=is_mo_gang)
                     await self._broadcast_langyong_tags_if_changed()
-                    # 立直一发消失
-                    _clear_ippatsu(self)
+                    # 暗杠使立直一发消失
+                    await _clear_ippatsu_and_notify(self)
                     self._last_kan_type = "ankan"
                     self.game_status = "deal_card_after_gang"
                     return
@@ -266,7 +283,7 @@ async def wait_action(self):
                                               combination_mask=self.player_list[self.current_player_index].combination_mask[combination_index],
                                               combination_target=f"k{normal_jia}",
                                               is_mo_gang=is_mo_gang)
-                    _clear_ippatsu(self)
+                    # 加杠不使一发消失（标准立直规则）
                     self._last_kan_type = "shouminkan"
                     self.jiagang_tile = normal_jia
                     self.action_dict = check_action_jiagang(self, normal_jia)
@@ -299,11 +316,8 @@ async def wait_action(self):
             tile_id = self.player_list[self.current_player_index].discard_tiles[-1]
             combination_mask = []
             combination_target = ""
-            # 记录本巡有荣和机会的玩家：若最终未荣和，则进入同巡振听（立直家额外锁立直振听）
-            ron_eligible_indexes = [
-                pi for pi, acts in self.action_dict.items()
-                if any(a in ("hu_first", "hu_second", "hu_third") for a in acts)
-            ]
+            # 使用等待开始时的快照：等待循环会清空已响应玩家的 action_dict，事后再扫会漏挂振听
+            ron_eligible_indexes = list(ron_eligible_snapshot)
             if self._pending_ron_claims:
                 if await resolve_collected_rons(self, tile_id, ron_eligible_indexes):
                     return
@@ -332,7 +346,7 @@ async def wait_action(self):
                     self.player_list[player_index].hand_tiles.remove(r2)
                     self.player_list[player_index].combination_tiles.append(f"s{normal_tile - 1}")
                     combination_target = f"s{normal_tile - 1}"
-                    combination_mask = [1, tile_id, 0, r1, 0, r2]
+                    combination_mask = [1, tile_id, 0, r2, 0, r1]
                 elif action_type == "chi_mid":
                     r1, r2 = _pick_chi_pair(self.player_list[player_index], action_type,
                                             normal_tile - 1, normal_tile + 1,
@@ -397,7 +411,8 @@ async def wait_action(self):
                     return
 
                 if action_type in ("chi_left", "chi_mid", "chi_right", "peng", "gang"):
-                    discarder = self.player_list[self.current_player_index]
+                    discarder_index = self.current_player_index
+                    discarder = self.player_list[discarder_index]
                     discarder.discard_tiles.pop(-1)
                     # 同步移除横置标记；如果被吃/碰/明杠走的就是立直家刚摆出的横置弃牌，
                     # 则给该玩家 riichi_marker_pending 置位，使其下一张弃牌仍横置（视觉上"续横"）
@@ -411,11 +426,15 @@ async def wait_action(self):
                     player_action_record_chipenggang(self, action_type=action_type, mingpai_tile=tile_id,
                                                      action_player=player_index, combination_mask=combination_mask)
                     await broadcast_do_action(self, action_list=[action_type], action_player=self.current_player_index,
-                                              combination_mask=combination_mask, combination_target=combination_target)
+                                              combination_mask=combination_mask, combination_target=combination_target,
+                                              cut_from_player=discarder_index, cut_tile=tile_id)
                     if self.sync_furiten_tags():
                         await broadcast_refresh_player_tag_list(self)
                     await self._broadcast_langyong_tags_if_changed()
-                    _clear_ippatsu(self)
+                    # 吃/碰/明杠：清除所有家一发；若被鸣的是尚未提交供托的立直家，提交时也不再补一发
+                    if getattr(discarder, "pending_riichi", False):
+                        discarder.skip_ippatsu = True
+                    await _clear_ippatsu_and_notify(self)
                     # 食替：吃/碰后到本家切牌前不可丢回的牌（吃来源 + 两面搭子的筋）
                     # 浪涌麻将可食替：不设禁切牌，允许吃什么打什么。
                     if self._kuikae_enabled() and action_type in ("chi_left", "chi_mid", "chi_right", "peng"):
@@ -470,10 +489,8 @@ async def wait_action(self):
 
         case "waiting_action_qianggang":
             # 抢杠和：放过抢杠机会的玩家与放过荣和同等处理——同巡振听；立直家则永久振听到本局结束
-            chankan_eligible_indexes = [
-                pi for pi, acts in self.action_dict.items()
-                if any(a in ("hu_first", "hu_second", "hu_third") for a in acts)
-            ]
+            # 同样使用等待开始时的快照，避免 pass 后 action_dict 已空导致漏挂振听
+            chankan_eligible_indexes = list(ron_eligible_snapshot)
             temp_jiagang_tile = self.jiagang_tile
             self.jiagang_tile = None
             if self._pending_ron_claims:
@@ -654,16 +671,21 @@ def _commit_pending_riichi(self):
             p.pending_riichi = False
             p.score -= 1000
             self.riichi_sticks += 1
-            if "ippatsu" not in p.tag_list:
+            if not getattr(p, "skip_ippatsu", False) and "ippatsu" not in p.tag_list:
                 p.tag_list.append("ippatsu")
 
 
-def _clear_ippatsu(self, keep_player_index=None):
+def _clear_ippatsu(self):
     for p in self.player_list:
-        if keep_player_index is not None and p.player_index == keep_player_index:
-            continue
         if "ippatsu" in p.tag_list:
             p.tag_list.remove("ippatsu")
+
+
+async def _clear_ippatsu_and_notify(self):
+    had_ippatsu = any("ippatsu" in p.tag_list for p in self.player_list)
+    _clear_ippatsu(self)
+    if had_ippatsu:
+        await broadcast_refresh_player_tag_list(self)
 
 
 def _apply_passed_ron_furiten(self, ron_eligible_indexes):

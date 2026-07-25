@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from .public.ai.get_action import get_action
+from .game_jiandan.get_action import get_action as jiandan_get_action
 from .public.sticker import broadcast_sticker
 from ..response import Response, SpectatorInfo
 
@@ -34,6 +35,10 @@ async def handle_gamestate_message(game_server, Connect_id: str, message: dict, 
         await handle_riichi_cut(game_server, Connect_id, message, websocket)
     elif message_type == "gamestate/riichi/send_action":
         await handle_send_action(game_server, Connect_id, message, websocket)
+    elif message_type == "gamestate/jiandan/cut_tile":
+        await handle_jiandan_cut_tile(game_server, Connect_id, message)
+    elif message_type == "gamestate/jiandan/send_action":
+        await handle_jiandan_send_action(game_server, Connect_id, message)
     elif message_type == "gamestate/riichi/set_ryuukyoku_tenpai":
         await handle_set_ryuukyoku_tenpai(game_server, Connect_id, message, websocket)
     elif message_type == "gamestate/GB/add_spectator":
@@ -44,6 +49,12 @@ async def handle_gamestate_message(game_server, Connect_id: str, message: dict, 
         await handle_get_spectator_list(game_server, Connect_id, message, websocket)
     elif message_type == "gamestate/send_sticker":
         await handle_send_sticker(game_server, Connect_id, message, websocket)
+    elif message_type == "gamestate/vote_start":
+        await handle_vote_start(game_server, Connect_id, message, websocket)
+    elif message_type == "gamestate/vote_response":
+        await handle_vote_response(game_server, Connect_id, message, websocket)
+    elif message_type == "gamestate/vote_resume":
+        await handle_vote_resume(game_server, Connect_id, message, websocket)
     else:
         logger.warning(f"未知的游戏状态消息路径: {message_type}")
 
@@ -66,7 +77,8 @@ async def handle_cut_tile(game_server, Connect_id: str, message: dict, websocket
             message.get("cutClass"), 
             message.get("TileId"), 
             cutIndex=message.get("cutIndex"),
-            target_tile=None
+            target_tile=None,
+            action_tick=message.get("action_tick"),
         )
     except Exception as e:
         logger.error(f"处理切牌请求失败: {e}", exc_info=True)
@@ -114,9 +126,66 @@ async def handle_send_action(game_server, Connect_id: str, message: dict, websoc
             cutIndex=None,
             target_tile=message.get("targetTile"),
             chi_combo_index=message.get("chiComboIndex", 0) or 0,
+            action_tick=message.get("action_tick"),
         )
     except Exception as e:
         logger.error(f"处理发送操作请求失败: {e}", exc_info=True)
+
+
+def _get_jiandan_state(game_server, message: dict):
+    """Resolve a Jiandan state without allowing cross-rule action routing."""
+    gamestate_id = message.get("gamestate_id")
+    if not gamestate_id:
+        logger.warning(f"简单麻将操作缺少 gamestate_id: {message}")
+        return None
+    game_state = game_server.gamestate_manager.get_game_state_by_gamestate_id(gamestate_id)
+    if game_state is None:
+        logger.warning(f"简单麻将游戏状态不存在: {gamestate_id}")
+        return None
+    if getattr(game_state, "room_rule", None) != "jiandan":
+        logger.warning(f"简单麻将操作被路由到其他规则: {gamestate_id}")
+        return None
+    return game_state
+
+
+async def handle_jiandan_cut_tile(game_server, Connect_id: str, message: dict):
+    """Forward a Jiandan discard to the rule's action adapter."""
+    try:
+        game_state = _get_jiandan_state(game_server, message)
+        if game_state is None:
+            return
+        await jiandan_get_action(
+            game_state,
+            Connect_id,
+            "cut",
+            message.get("cutClass"),
+            message.get("TileId"),
+            cutIndex=message.get("cutIndex"),
+            target_tile=None,
+            action_tick=message.get("action_tick"),
+        )
+    except Exception as e:
+        logger.error(f"处理简单麻将切牌请求失败: {e}", exc_info=True)
+
+
+async def handle_jiandan_send_action(game_server, Connect_id: str, message: dict):
+    """Forward a Jiandan non-discard action to the rule's action adapter."""
+    try:
+        game_state = _get_jiandan_state(game_server, message)
+        if game_state is None:
+            return
+        await jiandan_get_action(
+            game_state,
+            Connect_id,
+            message.get("action"),
+            cutClass=None,
+            TileId=None,
+            cutIndex=None,
+            target_tile=message.get("targetTile"),
+            action_tick=message.get("action_tick"),
+        )
+    except Exception as e:
+        logger.error(f"处理简单麻将操作请求失败: {e}", exc_info=True)
 
 async def handle_send_sticker(game_server, Connect_id: str, message: dict, websocket):
     """处理对局表情包发送请求（仅对局玩家可发）。"""
@@ -263,6 +332,9 @@ async def handle_add_spectator(game_server, Connect_id: str, message: dict, webs
             )
             await websocket.send_json(response.dict(exclude_none=True))
             return
+
+        # 同一用户只能挂一场延时观战，避免多场推流串台
+        await game_server.gamestate_manager.remove_spectator_from_all_games(user_id)
         
         # 添加观战玩家
         await guobiao_game_state.add_spectator(user_id, player_connection)
@@ -378,4 +450,80 @@ async def handle_get_spectator_list(game_server, Connect_id: str, message: dict,
             await websocket.send_json(response.dict(exclude_none=True))
         except:
             pass
+
+
+# ========== 房间对局投票暂停/结束 ==========
+
+async def _resolve_vote_context(game_server, Connect_id, message):
+    """解析投票消息所需的 game_state / user_id；仅允许自定义房间对局。"""
+    gamestate_id = message.get("gamestate_id")
+    if not gamestate_id:
+        return None, None, "缺少 gamestate_id"
+    game_state = game_server.gamestate_manager.get_game_state_by_gamestate_id(gamestate_id)
+    if not game_state:
+        return None, None, "游戏状态不存在"
+    if getattr(game_state, "room_type", None) != "custom":
+        return None, None, "仅自定义房间对局支持投票"
+    player_conn = game_server.players.get(Connect_id)
+    if not player_conn or not player_conn.user_id:
+        return None, None, "未登录"
+    return game_state, player_conn.user_id, None
+
+
+async def handle_vote_start(game_server, Connect_id, message, websocket):
+    try:
+        game_state, user_id, err = await _resolve_vote_context(game_server, Connect_id, message)
+        if err:
+            await _send_vote_tip(websocket, "gamestate/vote_start", False, err)
+            return
+        from .public.vote_manager import get_or_create_vote_manager
+        vm = get_or_create_vote_manager(game_state)
+        ok, msg = await vm.initiate_vote(user_id, message.get("vote_type"))
+        if not ok:
+            await _send_vote_tip(websocket, "gamestate/vote_start", False, msg)
+    except Exception as e:
+        logger.error(f"处理投票发起失败: {e}", exc_info=True)
+
+
+async def handle_vote_response(game_server, Connect_id, message, websocket):
+    try:
+        game_state, user_id, err = await _resolve_vote_context(game_server, Connect_id, message)
+        if err:
+            await _send_vote_tip(websocket, "gamestate/vote_response", False, err)
+            return
+        vm = getattr(game_state, "vote_manager", None)
+        if vm is None:
+            await _send_vote_tip(websocket, "gamestate/vote_response", False, "当前没有进行中的投票")
+            return
+        ok, msg = await vm.cast_vote(user_id, message.get("vote"))
+        if not ok:
+            await _send_vote_tip(websocket, "gamestate/vote_response", False, msg)
+    except Exception as e:
+        logger.error(f"处理投票响应失败: {e}", exc_info=True)
+
+
+async def handle_vote_resume(game_server, Connect_id, message, websocket):
+    try:
+        game_state, user_id, err = await _resolve_vote_context(game_server, Connect_id, message)
+        if err:
+            await _send_vote_tip(websocket, "gamestate/vote_resume", False, err)
+            return
+        vm = getattr(game_state, "vote_manager", None)
+        if vm is None:
+            await _send_vote_tip(websocket, "gamestate/vote_resume", False, "当前未处于暂停状态")
+            return
+        ok, msg = await vm.request_resume(user_id)
+        if not ok:
+            await _send_vote_tip(websocket, "gamestate/vote_resume", False, msg)
+    except Exception as e:
+        logger.error(f"处理解除暂停失败: {e}", exc_info=True)
+
+
+async def _send_vote_tip(websocket, msg_type, success, message):
+    # 用客户端已识别的 error_message 通道回执失败提示，避免下发客户端无法识别的 vote_* 类型
+    try:
+        response = Response(type="error_message", success=success, message=message)
+        await websocket.send_json(response.dict(exclude_none=True))
+    except Exception:
+        pass
 

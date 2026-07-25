@@ -71,7 +71,7 @@ public partial class GameCanvas {
             RectTransform drawRt = drawTileSeparate.GetComponent<RectTransform>();
             float dw = GetCardWidth(drawRt);
             float lastHalf = mainOrdered.Count > 0 ? lastMainWidth * 0.5f : dw * 0.5f;
-            float drawCenterX = x + lastHalf + dw * 0.5f;
+            float drawCenterX = x + lastHalf + dw * 0.3f; // 摸牌区间距 0.8 牌宽（原 dw*0.5 → 1.0）
             positions[drawRt] = new Vector2(drawCenterX, 0f);
         }
         return positions;
@@ -107,7 +107,7 @@ public partial class GameCanvas {
             RectTransform drawRt = drawTileSeparate.GetComponent<RectTransform>();
             float dw = GetCardWidth(drawRt);
             float lastHalf = mainOrdered.Count > 0 ? lastMainWidth * 0.5f : dw * 0.5f;
-            float drawCenterX = x + lastHalf + dw * 0.5f;
+            float drawCenterX = x + lastHalf + dw * 0.3f; // 摸牌区间距 0.8 牌宽（原 dw*0.5 → 1.0）
             positions[drawRt] = new Vector2(drawCenterX, 0f);
         }
         return positions;
@@ -176,6 +176,8 @@ public partial class GameCanvas {
     }
 
     private void CancelCompetingHandReflowAnimations(string reason) {
+        // 打断队列内重排等正在写位置的 AnimateCardsToPositions，避免与出牌收拢并行撕牌
+        _handLayoutAnimEpoch++;
         if (_sortMainHandCoroutine != null) {
             StopCoroutine(_sortMainHandCoroutine);
             _sortMainHandCoroutine = null;
@@ -263,22 +265,18 @@ public partial class GameCanvas {
         if (discardCard == null) {
             return;
         }
-        if (_discardLayoutCoroutine != null) {
-            StopCoroutine(_discardLayoutCoroutine);
-        }
+        CancelCompetingHandReflowAnimations("出牌收拢");
         _discardLayoutCoroutine = StartCoroutine(AnimateHandLayoutForDiscardCoroutine(discardCard, null, null));
     }
 
     /// <summary>
-    /// 拖拽出牌时可传入已算好的 main/draw（含理牌顺序变更）。
+    /// 拖拽出牌时可传入已算好的 main/draw（含理牌顺序变更）。main 不得包含 discardCard。
     /// </summary>
     public void AnimateHandLayoutForDiscard(TileCard discardCard, List<TileCard> main, TileCard draw) {
         if (discardCard == null) {
             return;
         }
-        if (_discardLayoutCoroutine != null) {
-            StopCoroutine(_discardLayoutCoroutine);
-        }
+        CancelCompetingHandReflowAnimations("出牌收拢");
         _discardLayoutCoroutine = StartCoroutine(AnimateHandLayoutForDiscardCoroutine(discardCard, main, draw));
     }
 
@@ -289,10 +287,23 @@ public partial class GameCanvas {
         List<TileCard> main = mainOverride ?? GetMainHandCardsOrdered(discardCard);
         TileCard draw = drawOverride;
         if (mainOverride == null) {
-            draw = discardCard.isDrawSlotPinned ? null : GetPinnedDrawTile();
-            if (draw == discardCard) {
-                draw = null;
+            // 手切（打出非摸牌张）时，摸牌张应并入手牌主列、补到空缺处。
+            // 这里直接让它在收拢预览中归位（与服务端返回后的最终重排一致），
+            // 避免出现"手牌先收拢、摸牌张随后才塞入空缺"的两段式排序动画。
+            TileCard pinnedDraw = discardCard.isDrawSlotPinned ? null : GetPinnedDrawTile();
+            if (pinnedDraw != null && pinnedDraw != discardCard) {
+                pinnedDraw.isDrawSlotPinned = false;
+                if (!main.Contains(pinnedDraw)) {
+                    main.Add(pinnedDraw);
+                }
+                bool autoArrange = AutoAction.Instance.IsAutoArrangeHandCards;
+                if (autoArrange) {
+                    main.Sort((a, b) => TileIdOrder.Compare(a.tileId, b.tileId));
+                } else {
+                    main.Sort((a, b) => a.handSortIndex.CompareTo(b.handSortIndex));
+                }
             }
+            draw = null;
         }
 
         Dictionary<RectTransform, Vector2> positions = BuildHandLayoutPositions(main, draw, discardCard);

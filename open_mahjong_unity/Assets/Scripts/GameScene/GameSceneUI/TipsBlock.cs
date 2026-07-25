@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -38,6 +37,19 @@ public class TipsBlock : MonoBehaviour, IPointerEnterHandler, IPointerExitHandle
             else if (NormalGameStateManager.Instance.roomRule == "riichi"){
                 waitingTiles = RiichiExternal.TingpaiCheck(selfHandTiles, combinationTiles, false);
             }
+            else if (NormalGameStateManager.Instance.roomRule == "sichuan"){
+                waitingTiles = SichuanExternal.TingpaiCheck(selfHandTiles, combinationTiles);
+                int dingque = NormalGameStateManager.Instance.selfDingqueSuit;
+                if (dingque == 1 || dingque == 2 || dingque == 3) {
+                    waitingTiles.RemoveWhere(w => (w / 10) == dingque);
+                }
+            }
+            else if (NormalGameStateManager.Instance.roomRule == "changsha"){
+                waitingTiles = ChangshaExternal.TingpaiCheck(selfHandTiles, combinationTiles);
+            }
+            else if (NormalGameStateManager.Instance.roomRule == "jiandan"){
+                waitingTiles = JiandanExternal.TingpaiCheck(selfHandTiles, combinationTiles);
+            }
             else{
                 Debug.LogWarning($"未知的规则类型: {NormalGameStateManager.Instance.roomRule}");
                 waitingTiles = new HashSet<int>();
@@ -59,6 +71,16 @@ public class TipsBlock : MonoBehaviour, IPointerEnterHandler, IPointerExitHandle
         }
     }
 
+    public void ShowRecordTips(RecordTipsContext ctx, List<int> handTiles, List<int> waitingTiles) {
+        if (ctx == null || waitingTiles == null || waitingTiles.Count == 0) {
+            HideTipsBlock();
+            return;
+        }
+        gameObject.SetActive(true);
+        TipsContainer.Instance.CacheTenpaiTips(handTiles, waitingTiles);
+        TipsContainer.Instance.SetTipsWithRecordContext(ctx, handTiles, waitingTiles);
+    }
+
     public void HideTipsBlock(){
         gameObject.SetActive(false);
         TipsContainer.Instance.ClearTenpaiTipsCache();
@@ -66,9 +88,15 @@ public class TipsBlock : MonoBehaviour, IPointerEnterHandler, IPointerExitHandle
 
     public void OnPointerEnter(PointerEventData eventData){
         Debug.Log("鼠标指向提示棱形");
-        // 鼠标指向时显示TipsContainer
-        TipsContainer.Instance.ShowTips();
-
+        var recordMgr = GameRecordManager.Instance;
+        if (recordMgr != null && recordMgr.gameObject.activeSelf && recordMgr.ShouldShowRecordTips()) {
+            recordMgr.RefreshRecordTips();
+            if (TipsContainer.Instance.HasCachedTenpaiTips) {
+                TipsContainer.Instance.ShowTips();
+            }
+            return;
+        }
+        TipsContainer.Instance.ShowCachedTenpaiTipsFromBlock();
     }
 
     public void OnPointerExit(PointerEventData eventData){

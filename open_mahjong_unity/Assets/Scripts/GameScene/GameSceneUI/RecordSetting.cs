@@ -10,7 +10,6 @@ public class RecordSetting : MonoBehaviour {
     [SerializeField] private TMP_Text showMoqieModeText; // 手摸切灰显
     [SerializeField] private TMP_Text showChongHintText; // 铳牌提示
 
-
     [Header("颜色配置")]
     [SerializeField] private Color falseColor = Color.white;
     [SerializeField] private Color trueColor = new Color(1f, 0.5f, 0f);
@@ -21,7 +20,7 @@ public class RecordSetting : MonoBehaviour {
     private bool isShowMoqieMode = true;
     public bool IsShowMoqieMode { get => isShowMoqieMode; }
 
-    private bool isShowChongHint;
+    private bool isShowChongHint = true;
     public bool IsShowChongHint { get => isShowChongHint; }
 
     private void Awake() {
@@ -34,6 +33,7 @@ public class RecordSetting : MonoBehaviour {
 
     public void Initialize() {
         gameObject.SetActive(true);
+        isShowChongHint = true;
         AddClickListener(showCardsModeText, ToggleShowCardsMode);
         AddClickListener(showMoqieModeText, ToggleShowMoqieMode);
         if (showChongHintText != null) {

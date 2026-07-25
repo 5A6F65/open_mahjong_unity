@@ -60,7 +60,7 @@ public partial class GameCanvas {
             { 2, dingqueBingButton },
             { 3, dingqueTiaoButton },
         };
-        int mode = ConfigManager.Instance != null ? ConfigManager.Instance.HandSortSuitOrderMode : 0;
+        int mode = ConfigManager.Instance.HandSortSuitOrderMode;
         int[] orderedSuits = TileIdOrder.GetOrderedSuitIds(mode);
         for (int i = 0; i < orderedSuits.Length; i++) {
             int suit = orderedSuits[i];
@@ -107,12 +107,10 @@ public partial class GameCanvas {
             _dingqueCountdownCoroutine = null;
         }
         HideDingqueSelection();
-        if (NormalGameStateManager.Instance != null && suit >= 1 && suit <= 3) {
+        if (suit >= 1 && suit <= 3) {
             NormalGameStateManager.Instance.selfDingqueSuit = suit;
         }
-        if (GameStateNetworkManager.Instance != null) {
-            GameStateNetworkManager.Instance.SendAction("dingque", suit);
-        }
+        GameStateNetworkManager.Instance.SendAction("dingque", suit);
         Debug.Log($"提交定缺：花色 {suit}（1=万 2=筒 3=条）");
     }
 
@@ -130,7 +128,7 @@ public partial class GameCanvas {
     /// </summary>
     private int ComputeFewestSuitFromSelfHand() {
         int[] count = new int[4];
-        var hand = NormalGameStateManager.Instance?.selfHandTiles;
+        var hand = NormalGameStateManager.Instance.selfHandTiles;
         if (hand != null) {
             foreach (int tile in hand) {
                 int suit = tile / 10;
@@ -174,7 +172,7 @@ public partial class GameCanvas {
     [SerializeField] private GameObject selfShunheIndicator;
     [SerializeField] private TMP_Text selfShunheText;
 
-    /// <summary>根据自家 tag_list 中的 shunhe_N 显示顺和跳过番（不可点和≤N番，听牌出牌后生效，摸牌解除）。</summary>
+    /// <summary>根据自家 tag_list 中的 shunhe_N 显示顺和跳过番（不可点和≤N番，听牌跳过和牌后立即生效，摸牌解除）。</summary>
     public void RefreshSelfShunheIndicator() {
         if (selfShunheIndicator == null) return;
         var gm = NormalGameStateManager.Instance;

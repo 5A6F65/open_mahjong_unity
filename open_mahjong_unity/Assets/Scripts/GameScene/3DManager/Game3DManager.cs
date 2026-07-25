@@ -2,10 +2,9 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
-using System.Threading.Tasks;
 
 public partial class Game3DManager : MonoBehaviour {
-    [SerializeField] private GameObject tile3DPrefab;    // 3D预制体
+    [SerializeField] private GameObject tile3DPrefab;    // 卡牌 3D预制体
     [SerializeField] private GameObject riichiTenbouPrefab; // 立直点棒（1000）3D预制体
     [Header("3D位置面板")]
     [SerializeField] private PosPanel3D selfPosPanel;    // 自家位置面板
@@ -17,25 +16,214 @@ public partial class Game3DManager : MonoBehaviour {
     private Vector3 leftSetCombinationsPoint;
     private Vector3 topSetCombinationsPoint;
     private Vector3 rightSetCombinationsPoint;
+    /// <summary>各家上一组副露末张沿排布方向的槽宽；跨组起步用半槽累加，避免吃后再吃叠牌。</summary>
+    private readonly Dictionary<string, float> _combinationLastSlotWidth = new Dictionary<string, float> {
+        { "self", 0f }, { "left", 0f }, { "top", 0f }, { "right", 0f },
+    };
 
-    private GameObject lastCutJiagang3DObject; // 最后一张切牌或加杠牌的3D对象（荣和/抢杠倒牌演出用）
+    // 出牌飞行动画协程按玩家隔离：避免 A 的飞牌协程被 B 的鸣牌 StopCoroutine 误终止，
+    // 也避免多家并发出牌时互相覆盖引用造成河牌停在中途或被错误回收。
+    private readonly Dictionary<string, Coroutine> _discardMoveCoroutinesByPlayer = new Dictionary<string, Coroutine>();
 
-    private Coroutine _currentDiscardMoveCoroutine; // 当前出牌飞行动画协程，鸣牌时需终止
-    private Vector3 lastRemove3DPosition; // 最后一张删除的3D对象
+    // 删除手牌的位置按玩家隔离：出牌飞牌起点只取本家删牌位，避免他家并发删牌覆盖起点导致牌飞错河。
+    private readonly Dictionary<string, Vector3> _lastRemovePosByPlayer = new Dictionary<string, Vector3> {
+        { "self", Vector3.zero }, { "left", Vector3.zero },
+        { "top", Vector3.zero }, { "right", Vector3.zero },
+    };
+
+    // 每家「最新弃牌」的 3D 对象 + 牌 id：在 Discard / DiscardWithoutAnimation Spawn 时登记。
+    // 鸣牌认走弃牌时优先用这个确切对象（校验 tileId），避免河里同类牌歧义（两张 7p 认错旧的）。
+    private readonly Dictionary<string, GameObject> _lastDiscardObjByPlayer = new Dictionary<string, GameObject>();
+    private readonly Dictionary<string, int> _lastDiscardTileIdByPlayer = new Dictionary<string, int>();
+
+    // 每家「最新加杠牌」的 3D 对象 + 牌 id：加杠动画放置时登记，供抢杠/荣和取牌（按玩家隔离，避免全局覆盖）。
+    private readonly Dictionary<string, GameObject> _lastJiagangObjByPlayer = new Dictionary<string, GameObject>();
+    private readonly Dictionary<string, int> _lastJiagangTileIdByPlayer = new Dictionary<string, int>();
+
+    private void RegisterLastDiscard(string playerPosition, GameObject obj, int tileId) {
+        if (string.IsNullOrEmpty(playerPosition)) return;
+        _lastDiscardObjByPlayer[playerPosition] = obj;
+        _lastDiscardTileIdByPlayer[playerPosition] = tileId;
+    }
+
+    private void ClearLastDiscard(string playerPosition) {
+        if (string.IsNullOrEmpty(playerPosition)) return;
+        _lastDiscardObjByPlayer[playerPosition] = null;
+    }
+
+    private void RegisterLastJiagang(string playerPosition, GameObject obj, int tileId) {
+        if (string.IsNullOrEmpty(playerPosition)) return;
+        _lastJiagangObjByPlayer[playerPosition] = obj;
+        _lastJiagangTileIdByPlayer[playerPosition] = tileId;
+    }
+
+    private void ClearLastJiagang(string playerPosition) {
+        if (string.IsNullOrEmpty(playerPosition)) return;
+        _lastJiagangObjByPlayer[playerPosition] = null;
+    }
+
+    private void ClearLastJiagangIfMatches(string playerPosition, GameObject obj) {
+        if (string.IsNullOrEmpty(playerPosition) || obj == null) return;
+        if (_lastJiagangObjByPlayer.TryGetValue(playerPosition, out GameObject reg) && reg == obj) {
+            ClearLastJiagang(playerPosition);
+        }
+    }
+
+    private void ClearAllLastDiscardAndJiagang() {
+        foreach (string pos in new[] { "self", "left", "top", "right" }) {
+            ClearLastDiscard(pos);
+            ClearLastJiagang(pos);
+            _lastDiscardTileIdByPlayer[pos] = 0;
+            _lastJiagangTileIdByPlayer[pos] = 0;
+        }
+    }
+
+    /// <summary>登记 tileId 与期望牌张是否一致（含赤宝 105/15 归一化）。期望 id 无效则不匹配。</summary>
+    private static bool TilesMatchForDiscardLookup(int registeredTileId, int expectedTileId) {
+        if (expectedTileId <= 0) return false;
+        if (registeredTileId == expectedTileId) return true;
+        return GameRecordMeldCodec.NormalizeMeldsLookupTileId(registeredTileId)
+            == GameRecordMeldCodec.NormalizeMeldsLookupTileId(expectedTileId);
+    }
+
+    /// <summary>
+    /// 认走/荣和取走弃牌时，仅认 Discard 分支 RegisterLastDiscard 登记的对象。
+    /// 不扫描河牌；认不到返回 null，由调用方打日志并放弃。
+    /// </summary>
+    private GameObject ResolveLastDiscardObject(string discarderPos, int expectedTileId) {
+        if (string.IsNullOrEmpty(discarderPos)) return null;
+        if (!_lastDiscardObjByPlayer.TryGetValue(discarderPos, out GameObject regObj)
+            || regObj == null || !regObj.activeInHierarchy) {
+            return null;
+        }
+        if (!_lastDiscardTileIdByPlayer.TryGetValue(discarderPos, out int regTile)) {
+            return null;
+        }
+        if (!TilesMatchForDiscardLookup(regTile, expectedTileId)) {
+            return null;
+        }
+        return regObj;
+    }
+
+    /// <summary>
+    /// 抢杠/加杠和牌张：副露区 id 匹配，或该玩家加杠动画登记对象（校验 tileId）。
+    /// 不扫描河牌；供荣和/抢杠取牌，不用于鸣牌回收河牌。
+    /// </summary>
+    private GameObject TryResolveJiagangSourceObject(string playerPosition, int expectedTileId) {
+        GameObject jiagangObj = FindJiagangTileObject(playerPosition, expectedTileId);
+        if (jiagangObj != null) return jiagangObj;
+        if (string.IsNullOrEmpty(playerPosition)) return null;
+        if (!_lastJiagangObjByPlayer.TryGetValue(playerPosition, out GameObject regObj)
+            || regObj == null || !regObj.activeInHierarchy) {
+            return null;
+        }
+        if (!_lastJiagangTileIdByPlayer.TryGetValue(playerPosition, out int regTile)) {
+            return null;
+        }
+        if (!TilesMatchForDiscardLookup(regTile, expectedTileId)) {
+            return null;
+        }
+        return regObj;
+    }
+
+    /// <summary>
+    /// 牌谱 Goto 重建专用：仅当河末张 id 与和牌张一致时登记，不做全河扫描。
+    /// </summary>
+    private GameObject TryRegisterRecordRiverLastDiscard(string sourcePlayerPosition, int expectedTileId) {
+        PosPanel3D panel = GetPosPanel(sourcePlayerPosition);
+        Transform river = panel?.discardsPosition;
+        if (river == null || river.childCount == 0) return null;
+        GameObject lastObj = river.GetChild(river.childCount - 1).gameObject;
+        Tile3D lastTile = lastObj.GetComponent<Tile3D>();
+        if (lastTile == null || !TilesMatchForDiscardLookup(lastTile.GetTileId(), expectedTileId)) {
+            return null;
+        }
+        RegisterLastDiscard(sourcePlayerPosition, lastObj, lastTile.GetTileId());
+        return lastObj;
+    }
+
+    private GameObject FindJiagangTileObject(string playerPosition, int expectedTileId) {
+        if (string.IsNullOrEmpty(playerPosition) || expectedTileId < 10) return null;
+        PosPanel3D panel = GetPosPanel(playerPosition);
+        if (panel?.combination3DObjects == null) return null;
+
+        GameObject lastMatch = null;
+        foreach (Transform comboParent in panel.combination3DObjects) {
+            if (comboParent == null) continue;
+            for (int i = 0; i < comboParent.childCount; i++) {
+                Tile3D tile3D = comboParent.GetChild(i).GetComponent<Tile3D>();
+                if (tile3D != null && TilesMatchForDiscardLookup(tile3D.GetTileId(), expectedTileId)) {
+                    lastMatch = tile3D.gameObject;
+                }
+            }
+        }
+        return lastMatch;
+    }
+
+    /// <summary>牌谱 Goto 重建：同步跑完副露放置（无动画），避免加杠 3D 下一帧才生成。</summary>
+    public void RunMeldRebuildImmediate(string playerIndex, string actionType, int[] combinationMask) {
+        RunCoroutineImmediate(ActionAnimationCoroutine(playerIndex, actionType, combinationMask, false));
+    }
+
+    private static void RunCoroutineImmediate(IEnumerator routine) {
+        if (routine == null) return;
+        var stack = new System.Collections.Generic.Stack<IEnumerator>();
+        stack.Push(routine);
+        while (stack.Count > 0) {
+            IEnumerator current = stack.Peek();
+            if (!current.MoveNext()) {
+                stack.Pop();
+                continue;
+            }
+            if (current.Current is IEnumerator nested) {
+                stack.Push(nested);
+            }
+        }
+    }
+
+    /// <summary>认走/荣和取走弃牌后：停掉该打牌者飞牌协程并清掉登记，
+    /// 避免被取走的牌仍在飞行/后续落到河里，或被后续鸣牌/荣和重复认走。</summary>
+    private void OnLastDiscardTaken(string discarderPos) {
+        StopDiscardMoveCoroutine(discarderPos);
+        ClearLastDiscard(discarderPos);
+    }
+
     private Dictionary<int,Vector3> pengToJiagangPosDict = new Dictionary<int,Vector3>(); // 碰牌的加杠预留指针
+
+    private void SetLastRemovePos(string playerPosition, Vector3 pos) {
+        if (string.IsNullOrEmpty(playerPosition)) return;
+        _lastRemovePosByPlayer[playerPosition] = pos;
+    }
+
+    private Vector3 GetLastRemovePos(string playerPosition) {
+        if (string.IsNullOrEmpty(playerPosition)) return Vector3.zero;
+        return _lastRemovePosByPlayer.TryGetValue(playerPosition, out Vector3 pos) ? pos : Vector3.zero;
+    }
+
+    private void StopDiscardMoveCoroutine(string playerPosition) {
+        if (string.IsNullOrEmpty(playerPosition)) return;
+        if (_discardMoveCoroutinesByPlayer.TryGetValue(playerPosition, out Coroutine c) && c != null) {
+            StopCoroutine(c);
+        }
+        _discardMoveCoroutinesByPlayer[playerPosition] = null;
+    }
+
+    private void StopAllDiscardMoveCoroutines() {
+        foreach (var kvp in _discardMoveCoroutinesByPlayer) {
+            if (kvp.Value != null) StopCoroutine(kvp.Value);
+        }
+        _discardMoveCoroutinesByPlayer.Clear();
+    }
 
     private float cardWidth; // 卡片宽度 组合牌 3D手牌使用
     private float cardHeight; // 卡片高度
-    private float cardThickness; // 卡片厚度（红色轴），用于暗杠抬高修正
     private float cardScale; // 卡片缩放
-    private float widthSpacing; // 间距为卡片宽度的1.05倍 弃牌 补花 使用
-    private float heightSpacing; // 间距为卡片高度的1.05倍
+    private float widthSpacing; // 弃牌/补花间距
+    private float heightSpacing; // 弃牌/补花纵向间距
     private Vector3 RightDirection; // 右方向
     private Vector3 LeftDirection; // 左方向
     private Vector3 FrontDirection; // 前方向
     private Vector3 BackDirection; // 后方向
-    private Vector3 UpDirection; // 上方向
-    private Vector3 DownDirection; // 下方向
 
     public static Game3DManager Instance { get; private set; }
 
@@ -48,26 +236,38 @@ public partial class Game3DManager : MonoBehaviour {
         if (GetComponent<ConcealedTile3DPeekController>() == null) {
             gameObject.AddComponent<ConcealedTile3DPeekController>();
         }
-        // 初始化配置
-        this.cardScale = tile3DPrefab.transform.localScale.z; // 卡片缩放比例
-        this.cardWidth = tile3DPrefab.GetComponent<Renderer>().bounds.size.x * 1.06f; // 卡片宽度（红色轴）
-        this.cardHeight = tile3DPrefab.GetComponent<Renderer>().bounds.size.y * 1.04f; // 卡片高度（绿色轴）
-        this.cardThickness = tile3DPrefab.GetComponent<Renderer>().bounds.size.z; // 卡片厚度（蓝色轴）
-        this.widthSpacing = cardWidth * 1.05f; // 间距为卡片宽度的1.1倍
-        this.heightSpacing = cardHeight * 1.05f; // 间距为卡片高度的1.1倍
+        ApplyTileOutlineSettings();
+        // 初始化配置（Mode B 描边不依赖物理缝；手牌/副露间隙→30%，牌河间隙→80%）
+        this.cardScale = tile3DPrefab.transform.localScale.z;
+        Renderer tileRenderer = tile3DPrefab.GetComponent<Renderer>();
+        float tileW = tileRenderer.bounds.size.x;
+        float tileH = tileRenderer.bounds.size.y;
+        const float handStepRatio = 1.10f;
+        const float handHeightRatio = 1.06f;
+        const float riverExtraRatio = 1.06f;
+        this.cardWidth = tileW * (1f + (handStepRatio - 1f) * 0.3f);
+        this.cardHeight = tileH * (1f + (handHeightRatio - 1f) * 0.3f);
+        float riverWidthOrig = tileW * handStepRatio * riverExtraRatio;
+        float riverHeightOrig = tileH * handHeightRatio * riverExtraRatio;
+        this.widthSpacing = tileW + (riverWidthOrig - tileW) * 0.8f;
+        this.heightSpacing = tileH + (riverHeightOrig - tileH) * 0.8f;
         // 初始化放置组合牌指针
         selfSetCombinationsPoint = selfPosPanel.combinationsPosition.position;
         leftSetCombinationsPoint = leftPosPanel.combinationsPosition.position;
         topSetCombinationsPoint = topPosPanel.combinationsPosition.position;
         rightSetCombinationsPoint = rightPosPanel.combinationsPosition.position;
+        ResetCombinationLastSlotWidths();
         // 初始化世界位置
         RightDirection = new Vector3(1,0,0);
         LeftDirection = new Vector3(-1,0,0);
         FrontDirection = new Vector3(0,0,1);
         BackDirection = new Vector3(0,0,-1);
-        UpDirection = new Vector3(0,1,0);
-        DownDirection = new Vector3(0,-1,0);
         ResetHandRevealAnimators();
+    }
+
+    /// <summary>应用玩家描边预设。</summary>
+    private void ApplyTileOutlineSettings() {
+        ConfigManager.Instance?.ApplyTileOutlinePreset();
     }
 
     /// <summary>
@@ -121,21 +321,6 @@ public partial class Game3DManager : MonoBehaviour {
         tenbou.transform.SetParent(endTransform.parent, worldPositionStays: true);
     }
 
-    /// <summary>
-    /// 流局后供托立直棒：无 riichi tag 时按场供数量在牌桌中央堆叠显示（不绑定具体玩家）。
-    /// </summary>
-    public void PlaceFieldRiichiTenbous(int count) {
-        if (count <= 0 || riichiTenbouPrefab == null || topPosPanel == null || topPosPanel.tenbouPos == null) return;
-        Transform anchor = topPosPanel.tenbouPos;
-        Quaternion rot = RiichiTenbouPlacementRotation("top");
-        for (int i = 0; i < count; i++) {
-            Vector3 offset = RightDirection * (cardWidth * 0.15f * i);
-            GameObject tenbou = Instantiate(riichiTenbouPrefab, anchor.position + offset, rot);
-            tenbou.name = $"FieldRiichiTenbou_{i}";
-            tenbou.transform.SetParent(anchor.parent, worldPositionStays: true);
-        }
-    }
-
     /// <summary>立直棒落点朝向：与各家河牌俯视一致，不继承 UI 节点旋转。</summary>
     private Quaternion RiichiTenbouPlacementRotation(string playerPosition) {
         if (playerPosition == "self") return Quaternion.Euler(90, 0, 180);
@@ -178,14 +363,12 @@ public partial class Game3DManager : MonoBehaviour {
     }
 
     /// <summary>河牌/副露俯视朝向，与各家弃牌区一致。</summary>
-    private Quaternion RiverTileWorldRotation(string playerPosition, bool isHorizontal = false) {
-        Quaternion rotation = Quaternion.identity;
-        if (playerPosition == "self") rotation = Quaternion.Euler(90, 0, 180);
-        else if (playerPosition == "left") rotation = Quaternion.Euler(90, 0, 90);
-        else if (playerPosition == "top") rotation = Quaternion.Euler(90, 0, 0);
-        else if (playerPosition == "right") rotation = Quaternion.Euler(90, 0, 270);
-        if (isHorizontal) rotation = Quaternion.Euler(0, 90, 0) * rotation;
-        return rotation;
+    private Quaternion RiverTileWorldRotation(string playerPosition) {
+        if (playerPosition == "self") return Quaternion.Euler(90, 0, 180);
+        if (playerPosition == "left") return Quaternion.Euler(90, 0, 90);
+        if (playerPosition == "top") return Quaternion.Euler(90, 0, 0);
+        if (playerPosition == "right") return Quaternion.Euler(90, 0, 270);
+        return Quaternion.identity;
     }
 
     /// <summary>倒牌动画 Cube 节点：cardsPosition 向上查找名为 Cube 的父节点。</summary>
@@ -233,7 +416,20 @@ public partial class Game3DManager : MonoBehaviour {
     }
 
     // 3D手牌处理入口：暗杠/加杠与杠后岭上摸牌走各家串行队列；其余走 Change3DTileCoroutine。
-    public void Change3DTile(string actionType,int tileId,int removeCount,string PlayerPosition,bool cut_class,int[] combination_mask, bool isRiichi = false, bool isMoGang = false, bool playCutPhysicsSound = false){
+    public void Change3DDiscardTiles(int[] tileIds, string PlayerPosition, bool cut_class, bool isRiichi = false, bool playCutPhysicsSound = false) {
+        if (tileIds == null || tileIds.Length == 0) {
+            return;
+        }
+        if (tileIds.Length == 1 && !HasPendingHandAnimWork(PlayerPosition)) {
+            Change3DTile("Discard", tileIds[0], 0, PlayerPosition, cut_class, null, isRiichi, playCutPhysicsSound: playCutPhysicsSound);
+            return;
+        }
+        for (int i = 0; i < tileIds.Length; i++) {
+            EnqueueDiscardHandWork(PlayerPosition, tileIds[i], cut_class, isRiichi, playCutPhysicsSound && i == 0);
+        }
+    }
+
+    public void Change3DTile(string actionType,int tileId,int removeCount,string PlayerPosition,bool cut_class,int[] combination_mask, bool isRiichi = false, bool isMoGang = false, bool playCutPhysicsSound = false, string meldDiscarderPos = null, int meldClaimedTile = 0){
         // 牌谱重建/重连的无动画分支直接执行，避免队列协程逐帧处理
         if (actionType == "SetDiscardWithoutAnimation" || actionType == "SetBuhuacardWithoutAnimation" || actionType == "SetRecordDiscardWithoutAnimation"){
             PosPanel3D panel = GetPosPanel(PlayerPosition);
@@ -258,13 +454,24 @@ public partial class Game3DManager : MonoBehaviour {
             return;
         }
 
+        // 牌谱跳转重建手牌须同步完成，避免 GotoAction 后紧跟 NextStep 和牌倒牌时，
+        // 异步 Init 在下一帧用牌背覆盖 PlayHepaiHandReveal 已铺好的明牌（他家）。
+        if (actionType == "InitHandCardsFromRecord") {
+            InitHandCardsFromRecordImmediate();
+            return;
+        }
+
         // 加杠把 isMoGang 传入 cut_class 位；暗杠走命名参数 isMoGang
         bool queueMoGang = actionType == "jiagang" ? cut_class : isMoGang;
         if (TryEnqueueAnkanHandChange(actionType, tileId, removeCount, PlayerPosition, combination_mask, queueMoGang)) {
             return;
         }
+        if (actionType == "Discard" && HasPendingHandAnimWork(PlayerPosition)) {
+            EnqueueDiscardHandWork(PlayerPosition, tileId, cut_class, isRiichi, playCutPhysicsSound);
+            return;
+        }
 
-        StartCoroutine(Change3DTileCoroutine(actionType, tileId, removeCount, PlayerPosition, cut_class, combination_mask, isRiichi, playCutPhysicsSound));
+        StartCoroutine(Change3DTileCoroutine(actionType, tileId, removeCount, PlayerPosition, cut_class, combination_mask, isRiichi, playCutPhysicsSound, meldDiscarderPos, meldClaimedTile));
     }
 
     // 同步初始化各家手牌：清空当前 cardsPosition，按 player_to_info 与 selfHandTiles 立即生成
@@ -284,37 +491,56 @@ public partial class Game3DManager : MonoBehaviour {
         int topCount = NormalGameStateManager.Instance.player_to_info["top"].hand_tiles_count;
         int rightCount = NormalGameStateManager.Instance.player_to_info["right"].hand_tiles_count;
         for (int i = 0; i < leftCount; i++) {
-            Get3DTile("left", "init", 0);
+            Get3DTile("left", "init");
         }
         for (int i = 0; i < topCount; i++) {
-            Get3DTile("top", "init", 0);
+            Get3DTile("top", "init");
         }
         for (int i = 0; i < rightCount; i++) {
-            Get3DTile("right", "init", 0);
+            Get3DTile("right", "init");
         }
     }
-    
-    public IEnumerator Change3DTileCoroutine(string actionType, int tileId, int removeCount, string PlayerPosition, bool cut_class, int[] combination_mask, bool isRiichi = false, bool playCutPhysicsSound = false) {
-        if (actionType == "InitHandCardsFromRecord") {
-            StopAllHandAnimationQueues();
-            yield return StartCoroutine(ClearRecordHandCardsCoroutine());
-            RenderRecordPlayerHand("left");
-            RenderRecordPlayerHand("top");
-            RenderRecordPlayerHand("right");
-            yield break;
-        }
 
+    /// <summary>牌谱 GotoAction / 切换明牌展示：同步清空并重建 left/top/right 手牌区。</summary>
+    private void InitHandCardsFromRecordImmediate() {
+        StopAllHandAnimationQueues();
+        ClearRecordHandCardsImmediate();
+        RenderRecordPlayerHand("left");
+        RenderRecordPlayerHand("top");
+        RenderRecordPlayerHand("right");
+    }
+
+    private void ClearRecordHandCardsImmediate() {
+        List<GameObject> objectsToReturn = new List<GameObject>();
+        CollectChildren(leftPosPanel.cardsPosition, objectsToReturn);
+        CollectChildren(topPosPanel.cardsPosition, objectsToReturn);
+        CollectChildren(rightPosPanel.cardsPosition, objectsToReturn);
+        CollectChildren(leftPosPanel.ShowCardsPosition, objectsToReturn);
+        CollectChildren(topPosPanel.ShowCardsPosition, objectsToReturn);
+        CollectChildren(rightPosPanel.ShowCardsPosition, objectsToReturn);
+        foreach (GameObject obj in objectsToReturn) {
+            if (obj != null) {
+                MahjongObjectPool.Instance.Return(-1, obj);
+            }
+        }
+    }
+
+    public IEnumerator Change3DTileCoroutine(string actionType, int tileId, int removeCount, string PlayerPosition, bool cut_class, int[] combination_mask, bool isRiichi = false, bool playCutPhysicsSound = false, string meldDiscarderPos = null, int meldClaimedTile = 0) {
         PosPanel3D panel = GetPosPanel(PlayerPosition);
         if (panel == null) {
             yield break;
         }
+
+        // 鸣牌保护节奏由服务器驱动：受保护观众的鸣牌帧本身被延迟 gap 后才发出，
+        // 客户端到帧即呈现。认走的打牌者+牌张在派发时捕获（meldDiscarderPos/meldClaimedTile），
+        // 不读共享字段，避免被后续鸣牌覆盖导致回收错河牌。
 
         if (actionType == "GetCard") {
             if (IsRecordShowCardsModeActive() && PlayerPosition != "self") {
                 yield return RecordShowCardGetCoroutine(PlayerPosition, tileId);
                 yield break;
             }
-            yield return Get3DTileCoroutine(PlayerPosition, "get", tileId);
+            yield return Get3DTileCoroutine(PlayerPosition, "get");
             yield break;
         }
 
@@ -324,10 +550,10 @@ public partial class Game3DManager : MonoBehaviour {
                 yield break;
             }
             if (IsSelfCardsPosition(panel.cardsPosition)) {
-                yield return RemoveSelfHandCardsCoroutine(panel.cardsPosition, 1, cut_class, tileId, null, skipRearrange: true);
+                yield return RemoveSelfHandCardsCoroutine(panel.cardsPosition, 1, cut_class, tileId, null, skipRearrange: true, PlayerPosition);
             }
             else {
-                yield return RemoveHandCardsCoroutine(panel.cardsPosition, 1, cut_class, tileId, null, skipRearrange: true);
+                yield return RemoveHandCardsCoroutine(panel.cardsPosition, 1, cut_class, tileId, null, skipRearrange: true, PlayerPosition);
             }
             if (playCutPhysicsSound) {
                 SoundManager.Instance.PlayPhysicsSound("cut");
@@ -343,52 +569,54 @@ public partial class Game3DManager : MonoBehaviour {
 
         if (actionType == "Buhua") {
             if (IsRecordShowCardsModeActive() && PlayerPosition != "self") {
-                yield return RecordBuhuaShowCardsCoroutine(PlayerPosition, tileId);
+                yield return RecordBuhuaShowCardsCoroutine(PlayerPosition, tileId, cut_class);
                 yield break;
             }
             if (IsSelfCardsPosition(panel.cardsPosition)) {
-                yield return RemoveSelfHandCardsCoroutine(panel.cardsPosition, 1, false, tileId, null, skipRearrange: true);
+                yield return RemoveSelfHandCardsCoroutine(panel.cardsPosition, 1, cut_class, tileId, null, skipRearrange: true, PlayerPosition);
             }
             else {
-                yield return RemoveHandCardsCoroutine(panel.cardsPosition, 1, false, tileId, null, skipRearrange: true);
+                yield return RemoveHandCardsCoroutine(panel.cardsPosition, 1, cut_class, tileId, null, skipRearrange: true, PlayerPosition);
             }
             yield return Set3DTileCoroutine(tileId, panel.buhuaPosition, "Buhua", PlayerPosition);
-            yield return Rearrange3DCardsWithAnimation(panel.cardsPosition);
+            // 摸补：摸牌区删花后保留主列与摸牌区间距，不收拢；手补仍收拢主列
+            if (!cut_class) {
+                yield return Rearrange3DCardsWithAnimation(panel.cardsPosition);
+            }
             yield break;
         }
 
         if (IsMeldHandAction(actionType)) {
             if (IsRecordShowCardsModeActive() && PlayerPosition != "self") {
-                yield return RecordMeldShowCardsCoroutine(PlayerPosition, actionType, combination_mask);
+                bool removeDrawFirst = (actionType == "angang" || actionType == "jiagang") && cut_class;
+                yield return RecordMeldShowCardsCoroutine(PlayerPosition, actionType, combination_mask, removeDrawFirst, tileId, meldDiscarderPos, meldClaimedTile);
                 yield break;
             }
-            StartMeldPresentation(actionType, PlayerPosition, combination_mask);
+            // 先等打牌者 cut 完成 RegisterLastDiscard 再回收河牌，避免队列延迟导致认牌失败。
+            // 副露动画与删手牌并行（与原 StartMeldPresentation 行为一致）。
+            yield return ReturnLastCutTileForMeldCoroutine(actionType, meldDiscarderPos, meldClaimedTile);
+            StartCoroutine(ActionAnimationCoroutine(PlayerPosition, actionType, combination_mask, true));
             bool meldCutClass = actionType == "jiagang" && cut_class;
             int meldDiscardId = actionType == "jiagang" && tileId >= 2 ? tileId : -1;
             if (IsSelfCardsPosition(panel.cardsPosition)) {
-                yield return RemoveSelfHandCardsCoroutine(panel.cardsPosition, removeCount, meldCutClass, meldDiscardId, combination_mask, skipRearrange: true);
+                yield return RemoveSelfHandCardsCoroutine(panel.cardsPosition, removeCount, meldCutClass, meldDiscardId, combination_mask, skipRearrange: true, PlayerPosition);
             }
             else {
-                yield return RemoveHandCardsCoroutine(panel.cardsPosition, removeCount, meldCutClass, meldDiscardId, combination_mask, skipRearrange: true);
+                yield return RemoveHandCardsCoroutine(panel.cardsPosition, removeCount, meldCutClass, meldDiscardId, combination_mask, skipRearrange: true, PlayerPosition);
             }
             yield return Rearrange3DCardsWithAnimation(panel.cardsPosition);
         }
     }
 
-    
-    /// <summary>河牌摸切灰显：牌谱阅览由左侧「手摸切」开关控制（缺省开）；对局读 GameInfo（缺省关）。</summary>
+    /// <summary>河牌摸切灰显：仅牌谱/观战回放可读 RecordSetting；对局与实时观战不显示。</summary>
     private bool ShouldApplyMoqieDiscardGray(bool cutClass) {
         if (!cutClass) return false;
         var recordMgr = GameRecordManager.Instance;
-        if (recordMgr != null && recordMgr.gameObject.activeSelf && recordMgr.gameRecord != null) {
-            // 牌谱阅览：以左侧手摸切开关为准，覆盖牌谱内 show_moqie_hint 标记
-            if (RecordSetting.Instance != null) {
-                return RecordSetting.Instance.IsShowMoqieMode;
-            }
-            return recordMgr.ShowMoqieHint;
+        if (recordMgr == null || !recordMgr.gameObject.activeSelf || recordMgr.gameRecord == null) {
+            return false;
         }
-        var gsm = NormalGameStateManager.Instance;
-        return gsm != null && gsm.showMoqieHint;
+        // 牌谱阅览：以左侧手摸切开关为准
+        return RecordSetting.Instance.IsShowMoqieMode;
     }
 
     // 根据玩家位置获取对应的位置面板
@@ -408,44 +636,6 @@ public partial class Game3DManager : MonoBehaviour {
         }
     }
 
-    // 清除手牌协程（用于在初始化前清除，确保 childCount 正确）
-    private IEnumerator ClearHandCardsCoroutine(){
-        // 先收集所有要归还的手牌对象，避免在遍历时修改集合
-        List<GameObject> objectsToReturn = new List<GameObject>();
-        
-        // 收集所有手牌
-        CollectChildren(leftPosPanel.cardsPosition, objectsToReturn);
-        CollectChildren(topPosPanel.cardsPosition, objectsToReturn);
-        CollectChildren(rightPosPanel.cardsPosition, objectsToReturn);
-        CollectChildren(selfPosPanel.cardsPosition, objectsToReturn);
-        
-        // 统一归还所有收集到的对象
-        foreach (GameObject obj in objectsToReturn)
-        {
-            if (obj != null)
-            {
-                MahjongObjectPool.Instance.Return(-1, obj);
-            }
-        }
-        
-        // 等待一帧，确保所有对象都被归还，childCount 更新
-        yield return null;
-    }
-
-    private IEnumerator ClearRecordHandCardsCoroutine(){
-        List<GameObject> objectsToReturn = new List<GameObject>();
-        CollectChildren(leftPosPanel.cardsPosition, objectsToReturn);
-        CollectChildren(topPosPanel.cardsPosition, objectsToReturn);
-        CollectChildren(rightPosPanel.cardsPosition, objectsToReturn);
-        CollectChildren(leftPosPanel.ShowCardsPosition, objectsToReturn);
-        CollectChildren(topPosPanel.ShowCardsPosition, objectsToReturn);
-        CollectChildren(rightPosPanel.ShowCardsPosition, objectsToReturn);
-        foreach (GameObject obj in objectsToReturn) {
-            MahjongObjectPool.Instance.Return(-1, obj);
-        }
-        yield return null;
-    }
-
     public void RefreshRecordHandDisplay(){
         Change3DTile("InitHandCardsFromRecord",0,0,null,false,null);
         if (GameRecordManager.Instance != null) {
@@ -458,8 +648,8 @@ public partial class Game3DManager : MonoBehaviour {
         Dictionary<string, GameRecordManager.RecordPlayer> players,
         string roomRule,
         HashSet<string> hiddenHandPositions) {
-        if (players == null || Card3DHoverManager.Instance == null) return;
-        if (RecordSetting.Instance == null || !RecordSetting.Instance.IsShowCardsMode) return;
+        if (players == null) return;
+        if (!RecordSetting.Instance.IsShowCardsMode) return;
 
         Color overlayColor = Card3DHoverManager.Instance.DangerOverlayColor;
         float intensity = Card3DHoverManager.Instance.DangerOverlayIntensity;
@@ -499,13 +689,32 @@ public partial class Game3DManager : MonoBehaviour {
         }
     }
 
+    /// <summary>牌谱国标错和确认续打：清除倒牌展示并按当前牌谱状态重建和牌者手牌区。</summary>
+    public void RestoreRecordPlayerHandAfterCuoheReveal(string winnerPosition) {
+        if (string.IsNullOrEmpty(winnerPosition) || GameRecordManager.Instance == null) return;
+
+        PosPanel3D panel = GetPosPanel(winnerPosition);
+        if (panel != null) {
+            ClearHandCardsPosition(panel.cardsPosition);
+            ForceHandRevealIdle(panel);
+        }
+
+        if (winnerPosition == "self") {
+            RoundEndPresentation.Instance.ShowSelfGameplayControlAndResyncHand3D();
+            return;
+        }
+
+        RenderRecordPlayerHand(winnerPosition);
+    }
+
     private void RenderRecordPlayerHand(string playerPosition){
         List<int> handTiles = GameRecordManager.Instance.recordPlayer_to_info[playerPosition].tileList;
+        bool pinDraw = GameRecordManager.Instance.recordPlayer_to_info[playerPosition].showHandDrawSlotActive;
         PosPanel3D panel = GetPosPanel(playerPosition);
         ClearPlayerRecordHandObjects(panel);
         bool isShowCardsMode = RecordSetting.Instance.IsShowCardsMode;
         if (isShowCardsMode){
-            LayRecordShowHandTiles(playerPosition, panel.ShowCardsPosition, handTiles);
+            LayRecordShowHandTiles(playerPosition, panel.ShowCardsPosition, handTiles, pinDraw);
             return;
         }
         for (int i = 0; i < handTiles.Count; i++){
@@ -513,138 +722,9 @@ public partial class Game3DManager : MonoBehaviour {
         }
     }
 
-    private bool TryGetRecordShowHandLayout(string playerPosition, out Vector3 direction, out Quaternion rotation) {
-        direction = Vector3.zero;
-        rotation = Quaternion.identity;
-        if (playerPosition == "left") {
-            direction = BackDirection;
-            rotation = RiverTileWorldRotation("left");
-            return true;
-        }
-        if (playerPosition == "top") {
-            direction = LeftDirection;
-            rotation = RiverTileWorldRotation("top");
-            return true;
-        }
-        if (playerPosition == "right") {
-            direction = FrontDirection;
-            rotation = RiverTileWorldRotation("right");
-            return true;
-        }
-        return false;
-    }
-
-    private void LayRecordShowHandTiles(string playerPosition, Transform showCardsPosition, IList<int> handTiles) {
-        if (!TryGetRecordShowHandLayout(playerPosition, out Vector3 direction, out Quaternion rotation)) return;
-
-        List<int> sortedTiles = new List<int>(handTiles);
-        sortedTiles.Sort(TileIdOrder.Compare);
-        Vector3 startPos = showCardsPosition.position;
-        for (int i = 0; i < sortedTiles.Count; i++) {
-            Vector3 pos = startPos + direction.normalized * widthSpacing * i;
-            GameObject cardObj = MahjongObjectPool.Instance.Spawn(sortedTiles[i], pos, rotation);
-            if (cardObj == null) continue;
-            cardObj.transform.SetParent(showCardsPosition, worldPositionStays: true);
-            cardObj.name = $"RecordShow_{i}";
-            if (Card3DHoverManager.Instance != null) {
-                Card3DHoverManager.Instance.RegisterCard(cardObj, sortedTiles[i]);
-            }
-        }
-    }
-
     private bool IsRecordShowCardsModeActive(){
-        return RecordSetting.Instance != null &&
-               RecordSetting.Instance.IsShowCardsMode &&
-               GameRecordManager.Instance != null &&
+        return RecordSetting.Instance.IsShowCardsMode &&
                GameRecordManager.Instance.gameObject.activeSelf;
-    }
-
-
-    /// <summary>
-    /// 牌谱展开模式：在 ShowCardsPosition 右侧以间隔放置摸到的牌（面朝上）
-    /// </summary>
-    private IEnumerator RecordShowCardGetCoroutine(string playerPosition, int tileId) {
-        PosPanel3D panel = GetPosPanel(playerPosition);
-        Transform showCards = panel.ShowCardsPosition;
-
-        if (!TryGetRecordShowHandLayout(playerPosition, out Vector3 direction, out Quaternion rotation)) yield break;
-
-        Vector3 spawnPosition = showCards.position + direction.normalized * widthSpacing * showCards.childCount;
-
-        GameObject cardObj = MahjongObjectPool.Instance.Spawn(tileId, spawnPosition, rotation);
-        if (cardObj == null) yield break;
-
-        cardObj.transform.SetParent(showCards, worldPositionStays: true);
-        cardObj.name = $"RecordGet_{showCards.childCount}";
-
-        if (Card3DHoverManager.Instance != null) {
-            Card3DHoverManager.Instance.RegisterCard(cardObj, tileId);
-        }
-
-        yield return null;
-    }
-
-    /// <summary>
-    /// 牌谱展开模式：按tileId排序并动画移动到正确位置
-    /// </summary>
-    private IEnumerator RearrangeRecordShowCardsWithAnimation(Transform showCardsPosition, string playerPosition) {
-        if (showCardsPosition == null || showCardsPosition.childCount == 0) yield break;
-
-        if (!TryGetRecordShowHandLayout(playerPosition, out Vector3 direction, out _)) yield break;
-
-        List<Transform> cards = new List<Transform>();
-        for (int i = 0; i < showCardsPosition.childCount; i++) {
-            cards.Add(showCardsPosition.GetChild(i));
-        }
-
-        cards.Sort((a, b) => {
-            Tile3D tileA = a.GetComponent<Tile3D>();
-            Tile3D tileB = b.GetComponent<Tile3D>();
-            int idA = tileA != null ? tileA.GetTileId() : 0;
-            int idB = tileB != null ? tileB.GetTileId() : 0;
-            return TileIdOrder.Compare(idA, idB);
-        });
-
-        Vector3 startPos = showCardsPosition.position;
-        List<Vector3> targetPositions = new List<Vector3>();
-        for (int i = 0; i < cards.Count; i++) {
-            targetPositions.Add(startPos + direction.normalized * widthSpacing * i);
-        }
-
-        yield return StartCoroutine(Animate3DCardsToPositions(cards, targetPositions, showCardsPosition));
-    }
-
-    /// <summary>
-    /// 牌谱展开模式：根据组合掩码从 ShowCardsPosition 中删除指定手牌
-    /// 掩码格式 [flag, tileId, flag, tileId, ...]
-    /// flag=0 手中牌(吃碰杠) / flag=2 暗杠牌 / flag=3 加杠牌 → 需从手牌删除
-    /// flag=1 来源牌(他人弃牌) → 不需要从手牌删除
-    /// </summary>
-    private IEnumerator RemoveRecordShowHandCardsByMaskCoroutine(Transform showCardsPosition, int[] combinationMask) {
-        if (showCardsPosition == null || combinationMask == null) yield break;
-
-        List<int> tilesToRemove = new List<int>();
-        for (int i = 0; i + 1 < combinationMask.Length; i += 2) {
-            int flag = combinationMask[i];
-            int tileId = combinationMask[i + 1];
-            if (flag != 1) {
-                tilesToRemove.Add(tileId);
-            }
-        }
-
-        foreach (int tileId in tilesToRemove) {
-            for (int i = 0; i < showCardsPosition.childCount; i++) {
-                Transform child = showCardsPosition.GetChild(i);
-                Tile3D tile3D = child.GetComponent<Tile3D>();
-                if (tile3D != null && tile3D.GetTileId() == tileId) {
-                    lastRemove3DPosition = child.position;
-                    MahjongObjectPool.Instance.Return(-1, child.gameObject);
-                    break;
-                }
-            }
-        }
-
-        yield return null;
     }
 
     private void ClearPlayerRecordHandObjects(PosPanel3D panel){
@@ -656,53 +736,20 @@ public partial class Game3DManager : MonoBehaviour {
         }
     }
 
-    private IEnumerator RemoveRecordShowHandCardCoroutine(Transform showCardsPosition, int tileId, bool cutClass){
-        if (showCardsPosition.childCount == 0) {
-            yield break;
-        }
-
-        Transform targetCard = null;
-        if (cutClass) {
-            for (int i = showCardsPosition.childCount - 1; i >= 0; i--) {
-                Transform child = showCardsPosition.GetChild(i);
-                Tile3D tile3D = child.GetComponent<Tile3D>();
-                if (tile3D != null && tile3D.GetTileId() == tileId) {
-                    targetCard = child;
-                    break;
-                }
-            }
-        } else {
-            for (int i = 0; i < showCardsPosition.childCount; i++) {
-                Transform child = showCardsPosition.GetChild(i);
-                Tile3D tile3D = child.GetComponent<Tile3D>();
-                if (tile3D != null && tile3D.GetTileId() == tileId) {
-                    targetCard = child;
-                    break;
-                }
-            }
-        }
-
-        if (targetCard == null) {
-            targetCard = showCardsPosition.GetChild(showCardsPosition.childCount - 1);
-        }
-
-        lastRemove3DPosition = targetCard.position;
-        MahjongObjectPool.Instance.Return(-1, targetCard.gameObject);
-        yield return null;
-    }
-    
     // 清除3D手牌
     public void Clear3DTile(){
+        ClearAllLastDiscardAndJiagang();
         // 重置组合牌指针
         selfSetCombinationsPoint = selfPosPanel.combinationsPosition.position;
         leftSetCombinationsPoint = leftPosPanel.combinationsPosition.position;
         topSetCombinationsPoint = topPosPanel.combinationsPosition.position;
         rightSetCombinationsPoint = rightPosPanel.combinationsPosition.position;
+        ResetCombinationLastSlotWidths();
         pengToJiagangPosDict.Clear();
-        
+
         // 先收集所有要归还的对象，避免在遍历时修改集合导致跳过元素
         List<GameObject> objectsToReturn = new List<GameObject>();
-        
+
         // 收集所有面板的弃牌
         CollectChildren(leftPosPanel.discardsPosition, objectsToReturn);
         CollectChildren(topPosPanel.discardsPosition, objectsToReturn);
@@ -721,14 +768,13 @@ public partial class Game3DManager : MonoBehaviour {
         CollectChildren(rightPosPanel.ShowCardsPosition, objectsToReturn);
         CollectChildren(selfPosPanel.ShowCardsPosition, objectsToReturn);
 
-        // 收集所有面板的手牌（含上局和牌/听牌摆出的明牌、未被 ClearHandCardsCoroutine 回收的残留）；
-        // 由同步的 Clear3DTile 单点回收，避免下一局 ClearHandCardsCoroutine 协程被先行启动的他局摆牌
-        // 干扰，从而引发对象池耗尽与重复手牌堆叠。
+        // 收集所有面板的手牌（含上局和牌/听牌摆出的明牌残留）；由同步 Clear3DTile 单点回收，
+        // 避免协程清手与下一局摆牌竞态导致对象池耗尽与重复堆叠。
         CollectChildren(leftPosPanel.cardsPosition, objectsToReturn);
         CollectChildren(topPosPanel.cardsPosition, objectsToReturn);
         CollectChildren(rightPosPanel.cardsPosition, objectsToReturn);
         CollectChildren(selfPosPanel.cardsPosition, objectsToReturn);
-        
+
         // 收集所有面板的组合牌3D对象数组中的子物体
         foreach (PosPanel3D panel in new[] { selfPosPanel, leftPosPanel, topPosPanel, rightPosPanel })
         {
@@ -740,7 +786,7 @@ public partial class Game3DManager : MonoBehaviour {
                 }
             }
         }
-        
+
         // 统一归还所有收集到的对象
         foreach (GameObject obj in objectsToReturn)
         {
@@ -760,22 +806,19 @@ public partial class Game3DManager : MonoBehaviour {
     /// 清空本对象上所有正在执行的协程（用于牌谱重新推理手牌前，避免旧动画与重建画面冲突）
     /// </summary>
     public void StopAllRunningAnimations() {
-        if (_currentDiscardMoveCoroutine != null) {
-            StopCoroutine(_currentDiscardMoveCoroutine);
-            _currentDiscardMoveCoroutine = null;
-        }
-        lastCutJiagang3DObject = null;
+        StopAllDiscardMoveCoroutines();
+        ClearAllLastDiscardAndJiagang();
         StopAllHandAnimationQueues();
         StopAllCoroutines();
     }
-    
+
     /// <summary>
     /// 收集 Transform 的所有子对象到列表中（避免在遍历时修改集合）
     /// </summary>
     private void CollectChildren(Transform parent, List<GameObject> collection)
     {
         if (parent == null) return;
-        
+
         // 使用倒序遍历，避免索引变化问题
         for (int i = parent.childCount - 1; i >= 0; i--)
         {

@@ -60,6 +60,10 @@ async def handle_room_message(game_server, Connect_id: str, message: dict, webso
         await handle_create_GB_room(game_server, Connect_id, message, websocket)
     elif message_type == "room/create_Qingque_room":
         await handle_create_Qingque_room(game_server, Connect_id, message, websocket)
+    elif message_type == "room/create_Changsha_room":
+        await handle_create_Changsha_room(game_server, Connect_id, message, websocket)
+    elif message_type == "room/create_Jiandan_room":
+        await handle_create_Jiandan_room(game_server, Connect_id, message, websocket)
     elif message_type == "room/create_Classical_room":
         await handle_create_Classical_room(game_server, Connect_id, message, websocket)
     elif message_type == "room/create_Sichuan_room":
@@ -82,6 +86,8 @@ async def handle_room_message(game_server, Connect_id: str, message: dict, webso
         await handle_kick_player_from_room(game_server, Connect_id, message, websocket)
     elif message_type == "room/set_ready":
         await handle_set_ready(game_server, Connect_id, message, websocket)
+    elif message_type == "room/sync_my_room":
+        await handle_sync_my_room(game_server, Connect_id, websocket)
     else:
         logger.warning(f"未知的房间消息路径: {message_type}")
 
@@ -111,7 +117,9 @@ async def handle_create_GB_room(game_server, Connect_id: str, message: dict, web
         message.get("tourist_limit", False),
         message.get("allow_spectator", True),
         message.get("tactical_call", False),
+        message.get("claim_protection", True),
         message.get("cuohe_type", 0),
+        message.get("event_id"),
     )
     await websocket.send_json(response.dict(exclude_none=True))
 
@@ -139,6 +147,76 @@ async def handle_create_Qingque_room(game_server, Connect_id: str, message: dict
         message.get("tourist_limit", False),
         message.get("allow_spectator", True),
         message.get("tactical_call", False),
+        message.get("claim_protection", True),
+        message.get("event_id"),
+    )
+    await websocket.send_json(response.dict(exclude_none=True))
+
+async def handle_create_Changsha_room(game_server, Connect_id: str, message: dict, websocket):
+    """处理创建长沙麻将房间请求"""
+    logging.info(f"创建长沙麻将房间请求 - 用户名: {Connect_id}")
+    if Connect_id in game_server.players:
+        player = game_server.players[Connect_id]
+        blocked = _reject_room_entry(game_server, player)
+        if blocked:
+            await websocket.send_json(blocked.dict(exclude_none=True))
+            return
+
+    response = await game_server.create_Changsha_room(
+        Connect_id,
+        message["roomname"],
+        message["gameround"],
+        message["password"],
+        message["roundTimerValue"],
+        message["stepTimerValue"],
+        message["tips"],
+        message.get("random_seed", 0),
+        message.get("sub_rule", "changsha/classic_double_bird"),
+        message.get("tourist_limit", False),
+        message.get("allow_spectator", True),
+        message.get("tactical_call", False),
+        message.get("claim_protection", True),
+        message.get("open_kong_replacement_count", 2),
+        message.get("initial_hu_si_xi", True),
+        message.get("initial_hu_ban_ban_hu", True),
+        message.get("initial_hu_que_yi_se", True),
+        message.get("initial_hu_liu_liu_shun", True),
+        message.get("initial_hu_san_tong", True),
+        message.get("bird_count", 2),
+        message.get("dealer_bird", True),
+        message.get("base_score_no_dealer", False),
+        message.get("small_hu_score", 2),
+        message.get("big_hu_score", 8),
+        message.get("event_id"),
+    )
+    await websocket.send_json(response.dict(exclude_none=True))
+
+
+async def handle_create_Jiandan_room(game_server, Connect_id: str, message: dict, websocket):
+    """Handle the fixed first-win Jiandan room request."""
+    logging.info(f"创建简单麻将房间请求 - 用户名: {Connect_id}")
+    if Connect_id in game_server.players:
+        player = game_server.players[Connect_id]
+        blocked = _reject_room_entry(game_server, player)
+        if blocked:
+            await websocket.send_json(blocked.dict(exclude_none=True))
+            return
+
+    response = await game_server.create_Jiandan_room(
+        Connect_id,
+        message["roomname"],
+        message["gameround"],
+        message["password"],
+        message["roundTimerValue"],
+        message["stepTimerValue"],
+        message["tips"],
+        message.get("random_seed", 0),
+        message.get("sub_rule", "jiandan/standard"),
+        message.get("tourist_limit", False),
+        message.get("allow_spectator", True),
+        False,
+        message.get("claim_protection", True),
+        message.get("event_id"),
     )
     await websocket.send_json(response.dict(exclude_none=True))
 
@@ -164,6 +242,7 @@ async def handle_create_Classical_room(game_server, Connect_id: str, message: di
         message.get("sub_rule", "classical/standard"),
         message.get("tourist_limit", False),
         message.get("allow_spectator", True),
+        message.get("event_id"),
     )
     await websocket.send_json(response.dict(exclude_none=True))
 
@@ -191,6 +270,8 @@ async def handle_create_Sichuan_room(game_server, Connect_id: str, message: dict
         message.get("allow_spectator", True),
         message.get("tactical_call", False),
         message.get("blood_battle", True),
+        message.get("claim_protection", True),
+        message.get("event_id"),
     )
     await websocket.send_json(response.dict(exclude_none=True))
 
@@ -223,6 +304,7 @@ async def handle_create_Riichi_room(game_server, Connect_id: str, message: dict,
         message.get("hepai_way", "multi_ron"),
         message.get("tourist_limit", False),
         message.get("allow_spectator", True),
+        message.get("event_id"),
     )
     await websocket.send_json(response.dict(exclude_none=True))
 
@@ -260,4 +342,9 @@ async def handle_kick_player_from_room(game_server, Connect_id: str, message: di
 async def handle_set_ready(game_server, Connect_id: str, message: dict, websocket):
     """处理玩家准备状态变更请求"""
     await game_server.set_player_ready(Connect_id, message["room_id"], message.get("ready", True))
+
+async def handle_sync_my_room(game_server, Connect_id: str, websocket):
+    """处理同步当前玩家房间状态请求"""
+    response = await game_server.sync_my_room(Connect_id)
+    await websocket.send_json(response.dict(exclude_none=True))
 

@@ -17,6 +17,7 @@ public class HeaderPanel : MonoBehaviour {
     [SerializeField] private HeaderButton matchButton;
     [SerializeField] private HeaderButton friendButton;
     [SerializeField] private HeaderButton backToGameButton;
+    [SerializeField] private HeaderButton logoutButton;
     [Tooltip("「正在对局中」的红色提醒按钮所使用的底色")]
     [SerializeField] private Color backToGameTintColor = new Color(0.92f, 0.34f, 0.34f);
     [Header("轮到自己操作时的提醒闪烁")]
@@ -40,9 +41,7 @@ public class HeaderPanel : MonoBehaviour {
     }
 
     private void Start() {
-        if (UserDataManager.Instance != null) {
-            UserDataManager.Instance.OnRoomIdChanged += RefreshButtonAppearance;
-        }
+        UserDataManager.Instance.OnRoomIdChanged += RefreshButtonAppearance;
         if (backToGameButton != null) {
             backToGameButton.Button.gameObject.SetActive(false);
             backToGameButton.Button.onClick.AddListener(BackToGame);
@@ -63,6 +62,7 @@ public class HeaderPanel : MonoBehaviour {
         if (sceneConfigButton != null) sceneConfigButton.Button.onClick.AddListener(SceneConfig);
         if (spectatorButton != null) spectatorButton.Button.onClick.AddListener(Spectator);
         if (friendButton != null) friendButton.Button.onClick.AddListener(Friend);
+        if (logoutButton != null) logoutButton.Button.onClick.AddListener(Logout);
 
         ConfigManager.OnLanguageChanged += RefreshHeaderLabels;
         RefreshHeaderLabels();
@@ -70,9 +70,7 @@ public class HeaderPanel : MonoBehaviour {
 
     private void OnDestroy() {
         ConfigManager.OnLanguageChanged -= RefreshHeaderLabels;
-        if (UserDataManager.Instance != null) {
-            UserDataManager.Instance.OnRoomIdChanged -= RefreshButtonAppearance;
-        }
+        UserDataManager.Instance.OnRoomIdChanged -= RefreshButtonAppearance;
     }
 
     /// <summary>
@@ -119,11 +117,11 @@ public class HeaderPanel : MonoBehaviour {
     }
     private void Record() {
         WindowsManager.Instance.SwitchWindow("record");
-        DataNetworkManager.Instance?.GetRecordList();
+        RecordPanel.Instance.OpenAndReload();
     }
     private void PlayerData() {
         WindowsManager.Instance.SwitchWindow("player");
-        DataNetworkManager.Instance?.GetLeaderboard();
+        DataNetworkManager.Instance.GetLeaderboard();
     }
     private void Config() => WindowsManager.Instance.SwitchWindow("config");
     private void AboutUs() => WindowsManager.Instance.SwitchWindow("aboutUs");
@@ -131,10 +129,6 @@ public class HeaderPanel : MonoBehaviour {
     private void SceneConfig() => WindowsManager.Instance.SwitchWindow("sceneConfig");
     private void Spectator() => WindowsManager.Instance.SwitchWindow("spectator");
     private void Match() {
-        if (UserDataManager.Instance != null && UserDataManager.Instance.IsTourist) {
-            NotificationManager.Instance?.ShowTip("匹配", false, "游客无法进行排位匹配，请先注册账号");
-            return;
-        }
         if (LobbyStateGuard.BlockIfInRoomForMatch()) {
             return;
         }
@@ -142,16 +136,23 @@ public class HeaderPanel : MonoBehaviour {
     }
 
     /// <summary>
-    /// 游客账户隐藏排位匹配入口；登录成功后由 NetworkManager 调用。
+    /// 确保排位匹配导航入口可见；登录成功后由 NetworkManager 调用。
     /// </summary>
     public void RefreshMatchButtonVisibility() {
         if (matchButton == null) return;
-        bool visible = UserDataManager.Instance == null || !UserDataManager.Instance.IsTourist;
-        matchButton.gameObject.SetActive(visible);
+        matchButton.gameObject.SetActive(true);
     }
     private void Friend() {
         WindowsManager.Instance.SwitchWindow("friend");
-        FriendNetworkManager.Instance?.ListAllFriendPanels();
+        FriendNetworkManager.Instance.ListAllFriendPanels();
+    }
+
+    private void Logout() {
+        NotificationManager.Instance.ShowMessage(
+            "登出",
+            "确定要登出当前账号吗？",
+            "logout_confirm"
+        );
     }
 
     /// <summary>
@@ -175,10 +176,11 @@ public class HeaderPanel : MonoBehaviour {
         spectatorButton?.SetState(_currentWindowName == "spectator", false, default);
         matchButton?.SetState(_currentWindowName == "match", false, default);
         friendButton?.SetState(_currentWindowName == "friend", false, default);
+        logoutButton?.SetState(false, false, default);
     }
 
     private static bool IsInRoom() {
-        return UserDataManager.Instance != null && UserDataManager.Instance.RoomId != UserDataManager.ROOM_ID_NONE;
+        return UserDataManager.Instance.RoomId != UserDataManager.ROOM_ID_NONE;
     }
 
     private void RefreshHeaderLabels() {
@@ -194,6 +196,7 @@ public class HeaderPanel : MonoBehaviour {
         SetButtonLabel(noticeButton, HeaderNavItem.Notice);
         SetButtonLabel(configButton, HeaderNavItem.Config);
         SetButtonLabel(backToGameButton, HeaderNavItem.BackToGame);
+        SetButtonLabel(logoutButton, HeaderNavItem.Logout);
     }
 
     private static void SetButtonLabel(HeaderButton button, HeaderNavItem item) {

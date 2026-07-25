@@ -3,7 +3,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 import time
 import logging
-from .action_check import check_action_after_cut,check_action_jiagang,check_action_buhua,check_action_hand_action,refresh_waiting_tiles
+from .action_check import check_action_after_cut,check_action_jiagang,check_action_buhua,check_action_hand_action,check_only_cut,refresh_waiting_tiles
 from .wait_action import wait_action
 from .boardcast import (
     broadcast_game_start,
@@ -20,8 +20,12 @@ from .boardcast import (
 from ..public.logic_common import get_index_relative_position, next_current_index, next_current_num, back_current_num, assign_strict_final_ranks
 from .init_tiles import init_qingque_tiles
 from ..public.next_game_round import next_game_round_qingque_switchseat
-from ..public.round_end_timing import hu_result_ready_wait_seconds, liuju_ready_wait_seconds
+from ..public.round_end_timing import (
+    hu_result_ready_wait_seconds,
+    liuju_ready_wait_seconds,
+)
 from ..public.spectator_rules import too_many_ai_for_spectator
+from ..public.vote_manager import vote_checkpoint
 from ..public.game_record_manager import init_game_record,init_game_round,player_action_record_buhua,player_action_record_deal,player_action_record_cut,player_action_record_angang,player_action_record_jiagang,player_action_record_chipenggang,player_action_record_hu,player_action_record_liuju,player_action_record_round_end,end_game_record,build_score_changes_by_seat,build_score_changes_dict,capture_player_entry_order
 from ...game_calculation.game_calculation_service import GameCalculationService
 from ...database.db_manager import DatabaseManager
@@ -137,11 +141,19 @@ class QingqueGameState:
         self.room_rule = room_data["room_rule"]
         self.room_type = room_data["room_type"]
         self.sub_rule = room_data.get("sub_rule") # 子规则
+        self.match_tier = room_data.get("match_tier")
+        self.event_id = room_data.get("event_id")
 
         self.room_random_seed = room_data.get("random_seed", 0) # 随机种子（默认为0）
         self.open_cuohe = room_data.get("open_cuohe", False) # 是否开启错和（默认为False）
         self.show_moqie_hint = room_data.get("show_moqie_hint", False) # 是否显示手摸切灰显（默认为False）
         self.tactical_call = room_data.get("tactical_call", False) # 战术鸣牌
+        self.claim_protection = room_data.get("claim_protection", True) # 鸣牌保护
+        self.tactical_pre_grace_delay = room_data.get("tactical_pre_grace_delay", 0.5)
+        self.tactical_grace_seconds = room_data.get("tactical_grace_seconds", 5.0)
+        self.claim_protect_delay = room_data.get("claim_protect_delay", 1.3)
+        self.claim_meld_followup_gap = room_data.get("claim_meld_followup_gap", 0.7)
+        self.claim_meld_post_gap = room_data.get("claim_meld_post_gap", 0.5)
         self.hepai_limit = 1 # 青雀起和限制固定为1
         self.tourist_limit = room_data.get("tourist_limit", False) # 游客限制
         self.allow_spectator_config = room_data.get("allow_spectator", True) # 允许观战配置
@@ -184,6 +196,9 @@ class QingqueGameState:
 
         self.backward_tiles_list_type = "double"
 
+        from ..public.claim_protection import init_claim_protection_state
+        init_claim_protection_state(self)
+
         # 如果您在管理自己规则内的分支，请不要将Debug = True 的配置上传到公共代码仓库 这一项单元配置不会得到review和测试
         self.Debug = False
 
@@ -200,12 +215,18 @@ class QingqueGameState:
 
     async def player_disconnect(self, user_id: int):
         """玩家掉线：增加 offline 标签并广播，如果所有非AI玩家都offline则销毁gamestate"""
+        newly_offline = False
         for p in self.player_list:
             if p.user_id == user_id:
                 if "offline" not in p.tag_list:
                     p.tag_list.append("offline")
+                    newly_offline = True
                     await broadcast_refresh_player_tag_list(self)
                 break
+
+        if newly_offline:
+            from ..public.offline import schedule_offline_auto_on_disconnect
+            schedule_offline_auto_on_disconnect(self, user_id)
         
         # 检查所有非AI玩家（user_id >= 10）是否都offline
         non_ai_players = [p for p in self.player_list if p.user_id >= 10]
@@ -299,6 +320,8 @@ class QingqueGameState:
 
     async def cleanup_game_state(self):
         """清理游戏状态协程：取消游戏循环任务（映射关系由 gamestate_manager 统一清理）"""
+        from ..public.outbound_pipe import close_outbound_pipes
+        close_outbound_pipes(self)
         # 清理观战管理器
         await self.spectator_manager.cleanup()
         
@@ -371,6 +394,10 @@ class QingqueGameState:
         # 牌谱/观战用：子规则与起和限制写入 game_title，客户端据此做番表显示
         self.game_record["game_title"]["sub_rule"] = self.sub_rule
         self.game_record["game_title"]["hepai_limit"] = self.hepai_limit
+        if self.match_tier is not None:
+            self.game_record["game_title"]["match_tier"] = self.match_tier
+        if self.event_id is not None:
+            self.game_record["game_title"]["event_id"] = self.event_id
         # 游戏主循环
         while self.current_round <= self.max_round * 4:
 
@@ -406,6 +433,7 @@ class QingqueGameState:
 
             # 游戏主循环
             while self.game_status != "END":
+                await vote_checkpoint(self)
                 match self.game_status:
 
                     # 普通摸牌操作：切换到下一个玩家进行摸牌
@@ -458,12 +486,11 @@ class QingqueGameState:
                         await self.broadcast_ask_other_action() # 广播是否胡牌
                         await self.wait_action() # 等待抢杠操作
 
-                    # 等待手牌操作（仅切牌、吃碰后）：
-                    case "onlycut_after_action": # 吃碰后切牌行为
+                    # 等待手牌操作（吃碰后：切牌 / 暗杠 / 加杠）
+                    case "onlycut_after_action":
                         print("onlycut_after_action")
-                        self.action_dict = {0:[],1:[],2:[],3:[]}
-                        self.action_dict[self.current_player_index].append("cut") # 吃碰后只允许切牌
-                        self.game_status = "waiting_hand_action" # 切换到摸牌后状态
+                        self.action_dict = check_only_cut(self, self.current_player_index)
+                        self.game_status = "waiting_hand_action"
 
                     # 如果没有匹配到
                     case _:
@@ -572,6 +599,11 @@ class QingqueGameState:
                                        hepai_player_huapai = he_huapai, # 和牌玩家花牌列表
                                        hepai_player_combination_mask = he_combination_mask, # 和牌玩家组合掩码
                                        score_changes = score_changes_dict,
+                                       next_status = (
+                                           "match_end"
+                                           if self.current_round >= self.max_round * 4
+                                           else "round_end_by_ready"
+                                       ),
                                        )
                 # 显示和牌传参
                 print(f"hu_class: {self.hu_class}, result_dict: {self.result_dict}")
@@ -593,6 +625,11 @@ class QingqueGameState:
                                        hepai_player_huapai = None, # 和牌玩家花牌列表
                                        hepai_player_combination_mask = None, # 和牌玩家组合掩码
                                        score_changes = liuju_score_changes,
+                                       next_status = (
+                                           "match_end"
+                                           if self.current_round >= self.max_round * 4
+                                           else "round_end_by_ready"
+                                       ),
                                        )
 
             record_fulu_rounds_for_players(self.player_list)
@@ -622,35 +659,44 @@ class QingqueGameState:
                 player_action_record_liuju(self)
             player_action_record_round_end(self)
             
-            # 根据和牌类型处理等待逻辑
-            if self.hu_class == "liuju":
-                await asyncio.sleep(liuju_ready_wait_seconds())
+            # 根据和牌类型处理等待逻辑（整场最后一局跳过 waiting_ready，由客户端 match_end 收尾）
+            self.next_status = (
+                "match_end"
+                if self.current_round >= self.max_round * 4
+                else "round_end_by_ready"
+            )
+            if self.next_status != "match_end":
+                if self.hu_class == "liuju":
+                    await asyncio.sleep(liuju_ready_wait_seconds())
+                else:
+                    fan_count = len(hu_fan) if hu_fan else 0
+                    wait_time = hu_result_ready_wait_seconds(fan_count)
+                    ready_phase_deadline = time.time() + wait_time
+
+                    self.action_dict = {}
+                    for player in self.player_list:
+                        if player.user_id <= 10:
+                            self.action_dict[player.player_index] = []
+                        else:
+                            self.action_dict[player.player_index] = ["ready"]
+                            player.remaining_time = int(wait_time)
+
+                    self.game_status = "waiting_ready"
+                    await broadcast_ready_status(self)
+                    while any(self.action_dict[i] for i in self.action_dict):
+                        for p in self.player_list:
+                            if self.action_dict.get(p.player_index):
+                                p.remaining_time = max(0, int(ready_phase_deadline - time.time()))
+                        if await wait_action(self) is False:
+                            break
+
+            if self.current_round < self.max_round * 4:
+                # 开启下一局的准备工作
+                next_game_round_qingque_switchseat(self)
+                logger.info(f"重新开始下一局")
             else:
-                fan_count = len(hu_fan) if hu_fan else 0
-                wait_time = hu_result_ready_wait_seconds(fan_count)
-                ready_phase_deadline = time.time() + wait_time
-
-                self.action_dict = {}
-                for player in self.player_list:
-                    if player.user_id <= 10:
-                        self.action_dict[player.player_index] = []
-                    else:
-                        self.action_dict[player.player_index] = ["ready"]
-                        player.remaining_time = int(wait_time)
-
-                self.game_status = "waiting_ready"
-                await broadcast_ready_status(self)
-                while any(self.action_dict[i] for i in self.action_dict):
-                    for p in self.player_list:
-                        if self.action_dict.get(p.player_index):
-                            p.remaining_time = max(0, int(ready_phase_deadline - time.time()))
-                    if await wait_action(self) is False:
-                        break
-
-            # 开启下一局的准备工作
-            next_game_round_qingque_switchseat(self)   
-
-            logger.info(f"重新开始下一局")
+                logger.info("最后一局结束，不再推进局数")
+                break
             # ↑ 重新开始下一局循环
         
         # 游戏结束所有局数
@@ -679,7 +725,9 @@ class QingqueGameState:
         
         # 检查是否包含AI玩家（user_id <= 10），如果没有AI玩家则保存统计数据
         has_ai_player = any(player.user_id <= 10 for player in self.player_list)
-        if not has_ai_player and game_id:
+        if self.room_type == "events":
+            logger.info(f'比赛场对局，仅保存牌谱，跳过统计数据保存，game_id: {game_id}')
+        elif not has_ai_player and game_id:
             total_rounds = len(self.game_record.get("game_round", {}))
             # 存储基础统计数据
             self.db_manager.store_qingque_game_stats(

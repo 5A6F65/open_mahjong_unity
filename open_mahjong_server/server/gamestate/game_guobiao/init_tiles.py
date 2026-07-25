@@ -1,6 +1,7 @@
 # 国标麻将牌堆初始化
 import random
 from ..public.random_seed_manager import derive_round_seed
+from .guobiao_debug import apply_guobiao_debug_hands, prepare_debug_wall
 
 
 def init_guobiao_tiles(self):
@@ -33,27 +34,12 @@ def _shuffle_and_deal_guobiao(self) -> None:
 
     debug_mode = getattr(self, 'Debug', False)
     if debug_mode:
-        # 国标调试用牌例
-        self.player_list[0].hand_tiles = [19,19,47,47,39]
-        self.player_list[0].combination_tiles = ["k41","k26","k13"]
-        self.player_list[0].combination_mask = [[1,41,1,41,1,41],[0,26,0,26,0,26],[1,13,1,13,1,13]]
-        self.player_list[1].hand_tiles = []
-        self.player_list[2].hand_tiles = []
-        self.player_list[3].hand_tiles = []
-
-        for tile in self.player_list[0].hand_tiles:
-            self.tiles_list.remove(tile)
-        for tile in self.player_list[1].hand_tiles:
-            self.tiles_list.remove(tile)
-        for tile in self.player_list[2].hand_tiles:
-            self.tiles_list.remove(tile)
-        for tile in self.player_list[3].hand_tiles:
-            self.tiles_list.remove(tile)
-
+        apply_guobiao_debug_hands(self)
+        _remove_assigned_tiles_from_wall(self.tiles_list, self.player_list)
+        prepare_debug_wall(self)
         for player in self.player_list:
-            if not player.hand_tiles:
-                for _ in range(13):
-                    player.get_tile(self.tiles_list, mark_draw_slot=False)
+            player.combination_tiles = []
+            player.combination_mask = []
     else:
         # 分配每位玩家13张牌
         for player in self.player_list:
@@ -63,3 +49,21 @@ def _shuffle_and_deal_guobiao(self) -> None:
         # 不标记摸牌区：客户端 InitHandCards 把 14 张平铺展示（无 currentGetTile 标记），
         # 庄家首打一律按手切处理，否则首打恰为服务端末张时会误判为摸切（手摸切不一致）。
         self.player_list[0].get_tile(self.tiles_list, mark_draw_slot=False)
+
+
+def _remove_assigned_tiles_from_wall(tiles_list, player_list) -> None:
+    """从牌山扣除 Debug 固定手牌；配置超出每种 4 张时抛出明确错误。"""
+    from collections import Counter
+
+    need = Counter()
+    for player in player_list:
+        need.update(player.hand_tiles)
+    wall = Counter(tiles_list)
+    for tile, count in need.items():
+        if wall[tile] < count:
+            raise ValueError(
+                f"Debug 手牌配置错误: 牌 {tile} 共需 {count} 张，牌山仅剩 {wall[tile]} 张"
+            )
+    for tile, count in need.items():
+        for _ in range(count):
+            tiles_list.remove(tile)

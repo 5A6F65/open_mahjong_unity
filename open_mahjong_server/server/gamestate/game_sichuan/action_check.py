@@ -5,11 +5,12 @@
 - 已和退场玩家 player.is_hu=True：不再行动、不被询问、不被点炮。
 - 和牌优先级 > 碰/杠（priority: hu_self=6, hu=5, peng/gang=2）。
 - 一炮多响：本次弃牌所有可和玩家结果都暂存到 self.sichuan_hu_results[idx]。
-- 顺和：跳过自摸/点炮/抢杠（含碰杠放弃）记录番数；听牌出牌后至下次摸牌前不可点和≤跳过番的牌（自摸不受限，tag: shunhe_N，仅本人可见）。
+- 顺和：跳过自摸/点炮/抢杠（含碰杠放弃）记录番数；听牌时立即生效，至下次摸牌前不可点和≤跳过番的牌（自摸不受限，tag: shunhe_N，仅本人可见）。
 """
 from typing import Dict, List
 import logging
 from ..public.logic_common import get_index_relative_position, next_current_num
+from ..public.hand_slot_utils import normalize_tile
 from .shunhe import is_blocked_by_shunhe
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,11 @@ def check_action_hand_action(self, player_index, is_get_gang_tile=False, is_firs
     """摸牌后检查本家操作：自摸/暗杠/加杠/切牌。
     定缺约束：手牌仍含定缺花色时须优先切定缺牌、不可和牌，但仍可对非定缺花色暗杠与加杠。"""
     temp_action_dict: Dict[int, list] = {0: [], 1: [], 2: [], 3: []}
+    # 清除本家旧和牌结果，避免杠后无自摸时仍残留 is_zimo，导致切牌误记顺和上限
+    if getattr(self, "sichuan_hu_results", None) is None:
+        self.sichuan_hu_results = {}
+    else:
+        self.sichuan_hu_results.pop(player_index, None)
     player = self.player_list[player_index]
     dingque = getattr(player, "dingque_suit", 0)
     has_dingque_in_hand = dingque in (1, 2, 3) and any(_suit(t) == dingque for t in player.hand_tiles)
@@ -160,11 +166,15 @@ def check_action_hand_action(self, player_index, is_get_gang_tile=False, is_firs
             if tile not in processed and player.hand_tiles.count(tile) == 4 and _suit(tile) != dingque:
                 temp_action_dict[player_index].append("angang")
                 processed.add(tile)
+        jiagang_added = False
         for combo in player.combination_tiles:
-            if combo[0] == "k":
-                jiatile = int(combo[1:])
-                if jiatile in player.hand_tiles and _suit(jiatile) != dingque:
+            if combo.startswith("k") and not jiagang_added:
+                jia_norm = normalize_tile(int(combo[1:]))
+                if _suit(jia_norm) != dingque and any(
+                    normalize_tile(t) == jia_norm for t in player.hand_tiles
+                ):
                     temp_action_dict[player_index].append("jiagang")
+                    jiagang_added = True
 
     temp_action_dict[player_index].append("cut")
 

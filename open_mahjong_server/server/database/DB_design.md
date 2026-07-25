@@ -36,6 +36,9 @@ PostgreSQL
 | is_tourist | BOOLEAN | DEFAULT FALSE | 是否为游客账户（游客账户可被删除） |
 | sponsor_expires_at | TIMESTAMP | NULL | 赞助者到期时间；NULL 或已过期表示非有效赞助者 |
 | is_mcrpl_qualified | BOOLEAN | NOT NULL DEFAULT FALSE | 是否拥有 MCRPL 资格 |
+| ban_expires_at | TIMESTAMP | NULL | 封禁到期时间；NULL 且 ban_type 非空表示永久封禁 |
+| ban_type | VARCHAR(32) | NULL | 封禁类型：`login` 禁止登录、`chat` 禁止发言、`match` 禁止排位、`full` 全面封禁；NULL 表示未封禁 |
+| ban_reason | TEXT | NULL | 封禁原因，登录被拒时展示给玩家 |
 | created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
 
 ### user_settings 用户设置表
@@ -58,6 +61,29 @@ PostgreSQL
 |--------|------|------|------|
 | user_id | BIGINT | PRIMARY KEY, REFERENCES users(user_id) ON DELETE CASCADE | 用户ID，外键关联 users |
 | volume | INT | NOT NULL DEFAULT 100 | 音量设置（0-100） |
+| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
+| updated_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 最近更新时间 |
+
+### user_login_ips 用户登录 IP 记录表
+记录每次成功登录的客户端 IP；写入后应用层自动裁剪，**每用户最多保留最近 20 条**。
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | BIGSERIAL | PRIMARY KEY | 自增主键 |
+| user_id | BIGINT | NOT NULL, REFERENCES users(user_id) ON DELETE CASCADE | 用户 ID |
+| ip_address | VARCHAR(45) | NOT NULL | 登录 IP（支持 IPv6） |
+| logged_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 登录时间 |
+
+### ip_bans IP 封禁表
+封禁指定 IP 的登录请求；`ban_expires_at` 为 NULL 表示永久封禁。
+
+| 字段名 | 类型 | 约束 | 说明 |
+|--------|------|------|------|
+| id | BIGSERIAL | PRIMARY KEY | 自增主键 |
+| ip_address | VARCHAR(45) | NOT NULL UNIQUE | 被封禁的 IP |
+| ban_expires_at | TIMESTAMP | NULL | 封禁到期时间；NULL 为永久 |
+| ban_reason | TEXT | NULL | 封禁原因 |
+| created_by | BIGINT | NULL, REFERENCES users(user_id) ON DELETE SET NULL | 操作管理员 |
 | created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP | 最近更新时间 |
 
@@ -84,6 +110,8 @@ PostgreSQL
 | character_used | INT | NULL | 使用的角色ID（可为空） |
 | profile_used | INT | NULL | 使用的头像ID（可为空） |
 | voice_used | INT | NULL | 使用的音色ID（可为空） |
+| is_favorite | BOOLEAN | NOT NULL DEFAULT FALSE | 当前玩家是否收藏该牌谱（每用户最多 50 条，业务层限制） |
+| note | VARCHAR(200) | NULL | 当前玩家对该牌谱的个人备注 |
 | PRIMARY KEY | (game_id, user_id) | 复合主键 | 每个游戏每个玩家一条记录 |
 
 > **牌谱保存规则**：

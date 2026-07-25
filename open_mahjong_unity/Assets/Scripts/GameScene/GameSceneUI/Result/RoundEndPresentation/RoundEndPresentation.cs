@@ -11,8 +11,6 @@ public partial class RoundEndPresentation : MonoBehaviour {
     [SerializeField] private GameObject selfGameplayControlRoot;
     [SerializeField] private CanvasGroup presentationCanvasGroup;
 
-
-    
     [SerializeField] private float fadeInSeconds = RoundEndTiming.RoundEndPresentationFadeSeconds;
     [SerializeField] private float handRevealHoldSeconds = RoundEndTiming.RoundEndHandRevealSeconds;
 
@@ -52,6 +50,14 @@ public partial class RoundEndPresentation : MonoBehaviour {
         if (activeRoundEndCoroutine != null) {
             StopCoroutine(activeRoundEndCoroutine);
             activeRoundEndCoroutine = null;
+        }
+    }
+
+    /// <summary>切局硬清：停演出并收起渐显根（不 SetActive false，以免挡住自家操作区子节点）。</summary>
+    public void HidePresentationVisual() {
+        StopActiveSequence();
+        if (presentationCanvasGroup != null) {
+            presentationCanvasGroup.alpha = 0f;
         }
     }
 

@@ -7,20 +7,36 @@ using UnityEngine;
 using UnityEngine.UI;
 
 /// <summary>
-/// GameRecordManager 观战模式扩展
-/// - 直播观战：自动推进，显示 ask 按钮（仅展示不可点）
-/// - 牌谱阅览：手动步进，忽略 ask
+/// GameRecordManager 延时观战模式扩展
+/// - 直播观战：自动推进，仅回放已发生的 action tick（不展示 ask 操作按钮）
+/// - 牌谱阅览：手动步进
 /// </summary>
 public partial class GameRecordManager {
     public bool IsSpectating { get; private set; } = false;
     /// <summary>true=直播观战模式 false=牌谱阅览模式(观战中手动浏览历史节点)</summary>
     public bool IsLiveSpectatorMode { get; private set; } = true;
 
+    /// <summary>
+    /// 延时观战（牌谱流）专用 gamestate_id，与实时观战/正常对局使用的 UserDataManager.GamestateId 分离。
+    /// static：冷启动时 GamePanel 被关掉，GameRecordManager.Awake 可能尚未执行，Instance 为空时仍需能登记会话。
+    /// </summary>
+    private static string _delayedSpectatorGamestateId = "";
+
+    /// <summary>已请求加入延时观战但尚未收到 record_init（或尚未进入 IsSpectating）。</summary>
+    public bool HasPendingDelayedSpectatorSession =>
+        !string.IsNullOrEmpty(_delayedSpectatorGamestateId) && !IsSpectating;
+
+    /// <summary>供 Instance 尚未就绪时判断是否有待加入的延时观战。</summary>
+    public static bool HasPendingDelayedSpectatorSessionStatic =>
+        !string.IsNullOrEmpty(_delayedSpectatorGamestateId);
+
     private Coroutine autoPlayCoroutine;
     private float autoPlaySpeed = 1.0f;
     private bool waitingForMoreTicks = false;
-    private readonly Queue<LiveAskEvent> liveAskQueue = new Queue<LiveAskEvent>();
     private bool PauseAutoPlay => !IsLiveSpectatorMode;
+    /// <summary>同一 (局, 节点) 上「已是最后行动」提示仅展示一次，避免滚轮/连点重复刷屏。</summary>
+    private int _lastReachedLastActionTipRound = -1;
+    private int _lastReachedLastActionTipNode = -1;
 
     [Header("观战模式面板（仅观战时显示）")]
     [SerializeField] private GameObject spectatorModePanel;
@@ -30,34 +46,55 @@ public partial class GameRecordManager {
     [SerializeField] private GameObject spectatorInfoView;
     [SerializeField] private TMP_Text spectatorInfoText;
 
-    private struct LiveAskEvent {
-        public int targetNode;
-        public List<string> tick;
+    /// <summary>
+    /// 延时观战：在发出 add_spectator 时绑定目标对局（纯牌谱阅览、实时观战不走此路径）。
+    /// </summary>
+    public static void PrepareDelayedSpectatorSession(string gamestateId) {
+        if (string.IsNullOrEmpty(gamestateId)) return;
+        _delayedSpectatorGamestateId = gamestateId;
+    }
+
+    public static void ClearDelayedSpectatorSession() {
+        _delayedSpectatorGamestateId = "";
+    }
+
+    /// <summary>延时观战推送是否属于当前会话（message_info.title = gamestate_id）。</summary>
+    public static bool IsCurrentDelayedSpectator(string gamestateId) {
+        return !string.IsNullOrEmpty(_delayedSpectatorGamestateId)
+            && _delayedSpectatorGamestateId == gamestateId;
     }
 
     /// <summary>
-    /// 开始观战：解析初始牌谱、剔除 ask 节点、快进到最新状态、启动自动播放
+    /// 客户端已放弃延时观战但服务端可能仍保留观战连接时，主动请求移除。
+    /// </summary>
+    public static void AbandonDelayedSpectatorSessionOnServer() {
+        if (string.IsNullOrEmpty(_delayedSpectatorGamestateId)) return;
+        string gamestateId = _delayedSpectatorGamestateId;
+        _delayedSpectatorGamestateId = "";
+        _ = GameStateNetworkManager.Instance.RemoveSpectator(gamestateId);
+    }
+
+    /// <summary>
+    /// 开始延时观战：解析初始牌谱、剔除 ask 节点、快进到最新状态、启动自动播放。
+    /// 已在延时观战中时（如对局结束推送完整牌谱）仅刷新牌谱，不重复做进入守卫。
     /// </summary>
     public void StartSpectating(string recordJson) {
         if (!IsSpectating && LobbyStateGuard.BlockIfInMatchQueueForSpectator()) return;
-        if (!IsSpectating && GameSessionGuard.BlockIfExclusiveSession("进入观战")) return;
+        if (!IsSpectating && !HasPendingDelayedSpectatorSession
+            && GameSessionGuard.BlockIfExclusiveSession("进入延时观战")) return;
 
         IsSpectating = true;
         IsLiveSpectatorMode = true;
         waitingForMoreTicks = false;
-        liveAskQueue.Clear();
+        ResetReachedLastActionTipGate();
+        ClearSpectatorActionButtons();
 
         PlayerRecordInfo[] playersInfo = ExtractPlayersSettings(recordJson);
         LoadRecord(recordJson, playersInfo);
 
-        // 观战中的 ask 只用于直播瞬时展示，不参与牌谱回放。
+        // 服务端 ask_hand/ask_other 不入牌谱，仅回放已发生的操作。
         RemoveAskTicksFromAllRounds();
         SyncRoundInspectorAndRoundButtons();
-
-        // 默认观战视角固定东家（可按既有牌谱逻辑切换视角）
-        selectedPlayerIndex = 0;
-        selectedPlayerUserid = gameRecord.gameRound.rounds.ContainsKey(1)
-            ? gameRecord.gameRound.rounds[1].p0UserId : 0;
 
         JumpToLatestState();
         ShowSpectatorModePanel(true);
@@ -77,32 +114,30 @@ public partial class GameRecordManager {
         IsLiveSpectatorMode = true;
         CurrentMode = RecordManagerMode.Record;
         waitingForMoreTicks = false;
-        liveAskQueue.Clear();
-        ClearSpectatorAskUI();
+        ResetReachedLastActionTipGate();
+        ClearSpectatorActionButtons();
         ShowSpectatorModePanel(false);
         UpdateModeUIVisibility();
         if (autoPlayCoroutine != null) {
             StopCoroutine(autoPlayCoroutine);
             autoPlayCoroutine = null;
         }
+        AbandonDelayedSpectatorSessionOnServer();
         GameSceneTeardown.ResetToIdle();
-        UserDataManager.Instance.SetGamestateId("");
     }
 
     /// <summary>切换到牌谱阅览模式：用于观战中手动切离最后节点。</summary>
     public void SwitchToRecordMode() {
         if (!IsSpectating) return;
         SetSpectatorModeFlags(false);
-        liveAskQueue.Clear();
-        ClearSpectatorAskUI();
+        ClearSpectatorActionButtons();
     }
 
     /// <summary>切回直播观战模式：自动推进并对齐到当前最新状态。</summary>
     public void SwitchToLiveMode() {
         if (!IsSpectating) return;
         SetSpectatorModeFlags(true);
-        liveAskQueue.Clear();
-        ClearSpectatorAskUI();
+        ClearSpectatorActionButtons();
         JumpToLatestState();
     }
 
@@ -117,13 +152,23 @@ public partial class GameRecordManager {
             SetSpectatorModeFlags(true);
         } else {
             SetSpectatorModeFlags(false);
-            liveAskQueue.Clear();
-            ClearSpectatorAskUI();
+            ClearSpectatorActionButtons();
         }
     }
 
     public void NotifyReachedLastAction() {
+        if (_lastReachedLastActionTipRound == currentRoundIndex
+            && _lastReachedLastActionTipNode == currentNode) {
+            return;
+        }
+        _lastReachedLastActionTipRound = currentRoundIndex;
+        _lastReachedLastActionTipNode = currentNode;
         NotificationManager.Instance.ShowTip("观战", false, "已经是最后一个行动了");
+    }
+
+    private void ResetReachedLastActionTipGate() {
+        _lastReachedLastActionTipRound = -1;
+        _lastReachedLastActionTipNode = -1;
     }
 
     /// <summary>供按钮逻辑判断：当前局是否还能继续前进一步。</summary>
@@ -146,9 +191,7 @@ public partial class GameRecordManager {
     }
 
     /// <summary>
-    /// 接收服务端推送的增量数据：
-    /// - ask 节点：仅在直播模式加入瞬时队列，不入牌谱
-    /// - 普通节点：追加到牌谱 actionTicks
+    /// 接收服务端推送的增量数据：ask 节点丢弃，仅将已发生的操作追加到 actionTicks。
     /// </summary>
     public void AppendSpectatorTicks(string updatesJson) {
         if (gameRecord == null || !IsSpectating) return;
@@ -181,12 +224,6 @@ public partial class GameRecordManager {
                     if (tickArr == null) continue;
                     List<string> tick = ConvertTickArrayToList(tickArr);
                     if (IsAskTick(tick)) {
-                        if (IsLiveSpectatorMode && roundIndex == currentRoundIndex) {
-                            liveAskQueue.Enqueue(new LiveAskEvent {
-                                targetNode = targetNode,
-                                tick = tick
-                            });
-                        }
                         continue;
                     }
                     roundData.actionTicks.Add(tick);
@@ -217,6 +254,8 @@ public partial class GameRecordManager {
             waitingForMoreTicks = false;
         }
 
+        // 不再走 GotoAction 批量跳转：堆积的 tick 由 AutoPlay 按序逐条 NextAction 播放，动画照播。
+
         // 若用户在牌谱阅览模式且已到最后一局最后节点，恢复直播模式
         if (!IsLiveSpectatorMode && gameRecord?.gameRound?.rounds != null) {
             int lastRound = 0;
@@ -239,15 +278,7 @@ public partial class GameRecordManager {
         spectatorExitButton.onClick.AddListener(OnClickExitSpectator);
     }
 
-    private async void OnClickExitSpectator() {
-        string gamestateId = UserDataManager.Instance.GamestateId;
-        if (!string.IsNullOrEmpty(gamestateId)) {
-            try {
-                await GameStateNetworkManager.Instance.RemoveSpectator(gamestateId);
-            } catch (System.Exception e) {
-                Debug.LogError($"发送退出观战消息失败: {e.Message}");
-            }
-        }
+    private void OnClickExitSpectator() {
         PostGameNavigator.ExitToSpectator();
     }
 
@@ -276,16 +307,17 @@ public partial class GameRecordManager {
                 continue;
             }
 
-            if (TryDequeueAndShowLiveAsk(out float askDelay)) {
-                yield return new WaitForSeconds(askDelay / autoPlaySpeed);
+            // 直播观战由 AutoPlay + end tick 驱动推进；和牌面板会置 IsAwaitingRecordResultConfirm，
+            // 若在此阻塞则永远无法执行 end tick 切局。停留时长由 GetSpectatorEndHoldDelay 控制。
+            if (BlocksRecordNavigation && !IsLiveSpectatorMode) {
+                yield return new WaitForSeconds(0.1f);
                 continue;
             }
 
             if (!HasMoreSpectatorTicks()) {
                 int nextRound = currentRoundIndex + 1;
-                if (gameRecord.gameRound.rounds.ContainsKey(nextRound)) {
-                    liveAskQueue.Clear();
-                    EndResultPanel.Instance.ClearEndResultPanel();
+                if (gameRecord.gameRound.rounds.ContainsKey(nextRound) && SpectatorCurrentRoundEndedWithEndTick()) {
+                    ClearRecordRoundEndPanels();
                     GotoSelectRound(nextRound, false);
                     continue;
                 }
@@ -299,34 +331,18 @@ public partial class GameRecordManager {
             // 否则会出现“和牌面板一闪而过就进入下一局”的问题（应与真实玩家 8 秒确认倒计时一致）。
             float delay = nextAction == "end" ? GetSpectatorEndHoldDelay() : GetSpectatorDelay(nextAction);
             yield return new WaitForSeconds(delay / autoPlaySpeed);
+            // end tick 会 ClearRecordRoundEndPanels → CancelRecordHuPresentation，中断进行中的和牌 3D 演出协程。
+            // 必须等演出协程结束再执行 end，否则和牌面板一闪而过或根本没显示完。
+            if (nextAction == "end") {
+                float waited = 0f;
+                while (_recordHuPresentationActive && waited < 10f) {
+                    yield return new WaitForSeconds(0.1f);
+                    waited += 0.1f;
+                }
+            }
             if (!IsSpectating) yield break;
             SpectatorNextAction();
         }
-    }
-
-    private bool TryDequeueAndShowLiveAsk(out float delay) {
-        delay = 0.5f;
-        while (liveAskQueue.Count > 0 && liveAskQueue.Peek().targetNode < currentNode) {
-            liveAskQueue.Dequeue();
-        }
-        if (liveAskQueue.Count == 0) return false;
-        LiveAskEvent nextAsk = liveAskQueue.Peek();
-        if (nextAsk.targetNode != currentNode) return false;
-        List<string> tick = liveAskQueue.Dequeue().tick;
-        if (tick == null || tick.Count == 0) return false;
-
-        string action = tick[0];
-        if (action == "ask_hand") {
-            HandleSpectatorAskHand(tick);
-            delay = GetSpectatorDelay("ask_hand");
-            return true;
-        }
-        if (action == "ask_other") {
-            HandleSpectatorAskOther(tick);
-            delay = GetSpectatorDelay("ask_other");
-            return true;
-        }
-        return false;
     }
 
     private bool HasMoreSpectatorTicks() {
@@ -344,8 +360,6 @@ public partial class GameRecordManager {
 
     private float GetSpectatorDelay(string action) {
         switch (action) {
-            case "ask_hand": return 0.8f;
-            case "ask_other": return 0.6f;
             case "d":
             case "gd":
             case "bd": return 0.3f;
@@ -374,7 +388,7 @@ public partial class GameRecordManager {
 
     /// <summary>
     /// 计算 end tick 的保持时长：end 会清除上一条结算面板，需保持到结算演出完成。
-    /// - 和牌：按番/符数量计算完整面板演出时长（含确认倒计时），与真实玩家观感一致；
+    /// - 和牌：按番/符数量计算完整面板演出时长，确认段用 SpectatorHuConfirmCountdownSeconds（5 秒）；
     /// - 流局/九种九牌：保持流局提示停留时间；
     /// - 其它：沿用默认短延时。
     /// </summary>
@@ -396,7 +410,8 @@ public partial class GameRecordManager {
                 // tick: [hu_class, hepai_index, hu_score, hu_fan_json, score_changes_json, base_fu?, fu_fan_list?]
                 int fanCount = ParseHuFanList(prevTick, 3)?.Length ?? 0;
                 int fuFanCount = prevTick.Count > 6 ? (ParseHuFanList(prevTick, 6)?.Length ?? 0) : 0;
-                return RoundEndTiming.GetHuResultPanelDuration(fanCount, fuFanCount, 0f);
+                return RoundEndTiming.GetHuResultPanelDuration(fanCount, fuFanCount, 0f,
+                    confirmCountdownSeconds: RoundEndTiming.SpectatorHuConfirmCountdownSeconds);
             }
             case "hu_riichi": {
                 // tick: [hu_riichi, hepai_index, hu_class, han, fu, yaku[], ...]
@@ -405,7 +420,8 @@ public partial class GameRecordManager {
                     return 2.0f;
                 }
                 int yakuCount = ParseHuFanList(prevTick, 5)?.Length ?? 0;
-                return RoundEndTiming.GetHuResultPanelDuration(yakuCount, 0, 0f);
+                return RoundEndTiming.GetHuResultPanelDuration(yakuCount, 0, 0f,
+                    confirmCountdownSeconds: RoundEndTiming.SpectatorHuConfirmCountdownSeconds);
             }
             case "liuju":
             case "jiuzhongjiupai":
@@ -428,11 +444,8 @@ public partial class GameRecordManager {
 
         string action = tick[0];
 
-        // 非 ask 行动一旦发生，清理 ask 按钮展示
-        ClearSpectatorAskUI();
-
         if (action == "end") {
-            EndResultPanel.Instance.ClearEndResultPanel();
+            ClearRecordRoundEndPanels();
             currentNode++;
             int nextRound = currentRoundIndex + 1;
             if (gameRecord.gameRound.rounds.ContainsKey(nextRound)) {
@@ -447,7 +460,8 @@ public partial class GameRecordManager {
             currentNode++;
             UpdateCurrentXunmuText();
         } else if (action == "jiuzhongjiupai") {
-            RoundEndPresentation.Instance.PresentLiuju("九老峰回", false);
+            TryGetActiveRecordRuleContext(out string roomRule, out _);
+            RoundEndPresentation.Instance.PresentLiuju(NormalGameStateManager.GetJiuzhongjiupaiCaption(roomRule), false);
             currentNode++;
             UpdateCurrentXunmuText();
         } else {
@@ -455,6 +469,7 @@ public partial class GameRecordManager {
             // 当本局继续打牌的行动 tick 到来、且仍残留着上一条（错和）结算面板时，先关闭面板，避免观战画面被一直盖住而“卡住”。
             if (IsContinuingPlayTickAction(action) && EndResultPanel.Instance != null
                 && EndResultPanel.Instance.IsAwaitingRecordResultConfirm) {
+                TryResumeAfterRecordCuoheContinue();
                 EndResultPanel.Instance.ClearEndResultPanel();
             }
             NextAction();
@@ -483,122 +498,87 @@ public partial class GameRecordManager {
         }
     }
 
-    private void ClearSpectatorAskUI() {
+    private static void ClearSpectatorActionButtons() {
         GameCanvas.Instance.ClearActionButton();
-        GameCanvas.Instance.HideDingqueSelection();
-    }
-
-    private void HandleSpectatorAskHand(List<string> tick) {
-        if (tick.Count < 3) return;
-        int askPlayerIndex = ParseTickInt(tick, 1);
-        currentPlayerIndex = askPlayerIndex;
-        if (indexToPosition.ContainsKey(askPlayerIndex)) {
-            string pos = indexToPosition[askPlayerIndex];
-            BoardCanvas.Instance.ShowCurrentPlayer(pos, currentTilesList.Count);
-        }
-
-        // 与正常对局一致：只有“当前选中视角玩家”可见自己的 ask_hand 操作按钮
-        if (askPlayerIndex != selectedPlayerIndex) {
-            ClearSpectatorAskUI();
-            return;
-        }
-
-        List<string> options = FilterAskHandActions(ParseCommaSeparatedActions(tick[2]));
-        if (options.Count > 0) {
-            GameCanvas.Instance.ShowSpectatorActionButtons(options);
-        } else {
-            ClearSpectatorAskUI();
-        }
-    }
-
-    private void HandleSpectatorAskOther(List<string> tick) {
-        if (tick.Count < 3) return;
-        string info = tick[2];
-        if (string.IsNullOrEmpty(info)) return;
-
-        List<string> selectedActions = null;
-        string[] playerEntries = info.Split(';');
-        foreach (string entry in playerEntries) {
-            if (string.IsNullOrEmpty(entry)) continue;
-            string[] parts = entry.Split(':');
-            if (parts.Length < 2) continue;
-            if (!int.TryParse(parts[0], out int playerIdx)) continue;
-            if (playerIdx != selectedPlayerIndex) continue;
-            selectedActions = ParseCommaSeparatedActions(parts[1]);
-            break;
-        }
-
-        // 与正常对局一致：只显示“自己”（当前选中视角）可执行的 ask_other 按钮
-        if (selectedActions == null || selectedActions.Count == 0) {
-            ClearSpectatorAskUI();
-            return;
-        }
-
-        List<string> options = FilterAskOtherActions(selectedActions);
-        if (options.Count > 0) {
-            GameCanvas.Instance.ShowSpectatorActionButtons(options);
-        } else {
-            ClearSpectatorAskUI();
-        }
-    }
-
-    private static List<string> FilterAskHandActions(List<string> raw) {
-        string[] allow = new[] { "cut", "buhua", "hu_self", "angang", "jiagang", "jiuzhongjiupai", "pass" };
-        return FilterByWhitelist(raw, allow);
-    }
-
-    private static List<string> FilterAskOtherActions(List<string> raw) {
-        string[] allow = new[] { "chi_left", "chi_mid", "chi_right", "peng", "gang", "hu_first", "hu_second", "hu_third", "pass" };
-        return FilterByWhitelist(raw, allow);
-    }
-
-    private static List<string> FilterByWhitelist(List<string> raw, string[] allow) {
-        var result = new List<string>();
-        if (raw == null || allow == null) return result;
-        var set = new HashSet<string>(allow);
-        foreach (string a in raw) {
-            if (set.Contains(a)) {
-                result.Add(a);
-            }
-        }
-        return result;
-    }
-
-    private static List<string> ParseCommaSeparatedActions(string commaSeparated) {
-        var list = new List<string>();
-        if (string.IsNullOrEmpty(commaSeparated)) return list;
-        foreach (string s in commaSeparated.Split(',')) {
-            string t = s?.Trim();
-            if (!string.IsNullOrEmpty(t)) list.Add(t);
-        }
-        return list;
     }
 
     private void JumpToLatestState() {
         if (gameRecord?.gameRound?.rounds == null) return;
+        ClearRecordRoundEndPanels();
         int lastRound = 1;
         foreach (var kvp in gameRecord.gameRound.rounds) {
             if (kvp.Key > lastRound) lastRound = kvp.Key;
         }
         currentRoundIndex = lastRound;
         InitGameRound(lastRound);
-        SyncSpectatorLiveToRoundTail(lastRound);
+        int tickCount = 0;
+        List<List<string>> actionTicks = null;
+        if (gameRecord.gameRound.rounds.TryGetValue(lastRound, out Round rd) && rd.actionTicks != null) {
+            actionTicks = rd.actionTicks;
+            tickCount = actionTicks.Count;
+        }
+        // 快进到最新 node，但保留末尾「结算 + end」给 AutoPlay 正常播和牌/流局面板；GotoAction 只重建状态不触发演出。
+        int catchUpNode = ResolveSpectatorCatchUpNode(actionTicks);
+        if (catchUpNode > 0) {
+            GotoAction(catchUpNode);
+        }
+        waitingForMoreTicks = catchUpNode >= tickCount;
     }
 
     /// <summary>
-    /// 直播观战自动切局：快进到该局已有 tick 末尾并保持直播模式（避免 node=0 被误判为牌谱阅览）。
+    /// 观战追帧目标 node：跳过已完结的 end，且若末尾是「结算→end」则停在结算 tick 前，由 AutoPlay 播面板后再 end 切局。
     /// </summary>
-    private void SyncSpectatorLiveToRoundTail(int roundIndex) {
-        if (!IsSpectating) return;
-        int tickCount = 0;
-        if (gameRecord.gameRound.rounds.TryGetValue(roundIndex, out Round roundData) && roundData.actionTicks != null) {
-            tickCount = roundData.actionTicks.Count;
+    private static int ResolveSpectatorCatchUpNode(List<List<string>> ticks) {
+        if (ticks == null || ticks.Count == 0) return 0;
+        int node = ticks.Count;
+        while (node > 0 && GetTickAction(ticks, node - 1) == "end") {
+            node--;
         }
-        if (tickCount > 0) {
-            GotoAction(tickCount);
+        if (node < ticks.Count) {
+            while (node > 0 && IsSpectatorSettlementTick(GetTickAction(ticks, node - 1))) {
+                node--;
+            }
         }
-        SetSpectatorModeFlags(true);
-        waitingForMoreTicks = tickCount == 0;
+        return node;
+    }
+
+    private static string GetTickAction(List<List<string>> ticks, int index) {
+        if (ticks == null || index < 0 || index >= ticks.Count) return "";
+        List<string> tick = ticks[index];
+        return tick != null && tick.Count > 0 ? tick[0] : "";
+    }
+
+    private static bool IsSpectatorSettlementTick(string action) {
+        switch (action) {
+            case "hu_self":
+            case "hu_first":
+            case "hu_second":
+            case "hu_third":
+            case "hu_riichi":
+            case "liuju":
+            case "jiuzhongjiupai":
+            case "ryuukyoku":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// 本局 tick 已全部播完且最后一条为 end（与牌谱切局条件一致，防止下一局 key 先到就提前跳局）。
+    /// </summary>
+    private bool SpectatorCurrentRoundEndedWithEndTick() {
+        if (!gameRecord.gameRound.rounds.TryGetValue(currentRoundIndex, out Round roundData)) {
+            return false;
+        }
+        if (roundData.actionTicks == null || roundData.actionTicks.Count == 0) {
+            return false;
+        }
+        if (currentNode < roundData.actionTicks.Count) {
+            return false;
+        }
+        List<string> lastTick = roundData.actionTicks[roundData.actionTicks.Count - 1];
+        return lastTick != null && lastTick.Count > 0 && lastTick[0] == "end";
     }
 
     private string BuildSpectatorInfoString() {
@@ -645,7 +625,6 @@ public partial class GameRecordManager {
         sb.AppendLine($"当前视角玩家Index: {selectedPlayerIndex} (UID:{selectedPlayerUserid})");
         sb.AppendLine($"牌山剩余: {tileWallCount}");
         AppendCommitmentSaltLines(sb, gameRecord.gameTitle);
-        sb.AppendLine($"直播询问缓存: {liveAskQueue.Count}");
         sb.AppendLine($"玩家0: {p0Name} (ID:{p0})");
         sb.AppendLine($"玩家1: {p1Name} (ID:{p1})");
         sb.AppendLine($"玩家2: {p2Name} (ID:{p2})");
@@ -680,15 +659,14 @@ public partial class GameRecordManager {
         bool inRecord = CurrentMode == RecordManagerMode.Record;
         bool inSpectator = CurrentMode == RecordManagerMode.Spectator || CurrentMode == RecordManagerMode.RecordOnSpectator;
 
-        if (ExitButtonManager.Instance != null) {
-            if (inSpectator) ExitButtonManager.Instance.ShowForSpectator();
-            else if (inRecord) ExitButtonManager.Instance.ShowForRecord();
-            else ExitButtonManager.Instance.HideAll();
-        }
+        if (inSpectator) ExitButtonManager.Instance.ShowForSpectator();
+        else if (inRecord) ExitButtonManager.Instance.ShowForRecord();
+        else ExitButtonManager.Instance.HideAll();
         showGameInfoButton.gameObject.SetActive(inRecord);
         showSpectatorInfoButton.gameObject.SetActive(inSpectator);
         if (inSpectator) gameInfoView.SetActive(false);
         if (inRecord) spectatorInfoView.SetActive(false);
+        UpdateRecordAutoPlayButtonVisibility();
     }
 
     private static bool IsAskTick(List<string> tick) {
@@ -777,4 +755,3 @@ public partial class GameRecordManager {
         return round;
     }
 }
-

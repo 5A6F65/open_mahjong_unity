@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Collections.Generic;
 
 [System.Serializable]
@@ -39,6 +39,9 @@ public partial class NormalGameStateManager : MonoBehaviour{
     public string roomRule; // 房间规则（guobiao/qingque等）
     public string subRule;  // 子规则（guobiao/standard、guobiao/xiaolin、qingque/standard）
     public int hepaiLimit = 8; // 起和番限制（国标有效，服务器下发的 hepai_limit，默认8）
+    public bool changshaBaseScoreNoDealer;
+    public int changshaSmallHuScore = 2;
+    public int changshaBigHuScore = 8;
     public int selfIndex; // 自身位置 0东 1南 2西 3北
     public int roomStepTime; // 步时
     public int roomRoundTime; // 局时
@@ -58,6 +61,8 @@ public partial class NormalGameStateManager : MonoBehaviour{
 
     public List<string> allowActionList = new List<string>(); // 允许操作列表
     public int lastCutCardID; // 上一张切牌的ID
+    /// <summary>最近一次询问（手牌/鸣牌）的 action_tick，发送操作时回传给服务端用于丢弃过期提交（防战术鸣牌前的延迟取消/碰被错误消费）。</summary>
+    public int LastAskActionTick;
     /// <summary>当前鸣牌询问对应的切牌 id（仅来自 ask_other_action.cut_tile）。</summary>
     public int currentAskCutTileId;
     /// <summary>当前鸣牌询问是否来自他人加杠（抢杠和）。</summary>
@@ -65,7 +70,13 @@ public partial class NormalGameStateManager : MonoBehaviour{
     private bool pendingAskFromJiagang;
     /// <summary>上一张切牌玩家座位（荣和倒牌从河牌抓取时使用）。</summary>
     public string lastDiscardPlayerPosition;
+    /// <summary>本次鸣牌（吃/碰/明杠）真正认走的打牌者座位，由 action_tick 回查得到，供 3D 回收河牌使用。乱序下比 lastDiscardPlayerPosition 可靠。</summary>
+    public string currentMeldDiscarderPos;
+    /// <summary>本次鸣牌真正认走的被鸣牌张 id，由 action_tick 回查得到。</summary>
+    public int currentMeldClaimedTileId;
     public string CurrentPlayer; // 当前玩家字符串
+    /// <summary>上次 ask_hand_action 的 player_index；-1 表示本局尚未 ask，首次 ask 不收拢手牌。</summary>
+    private int lastAskHandPlayerIndex = -1;
     public List<int> selfHandTiles = new List<int>(); // 手牌列表
 
     /// <summary>当前是否在等待自己做出手牌/鸣牌操作（供回到主菜单时的红色提醒按钮判断）。</summary>
@@ -106,6 +117,8 @@ public partial class NormalGameStateManager : MonoBehaviour{
 
     // 上次摸牌类型
     public string lastDealTileType; // 上次摸牌类型
+    /// <summary>自家最近一次摸入的牌 id（deal_tile/deal_gang_tile/deal_buhua_tile）；切牌后清零。</summary>
+    public int lastDealTileId;
 
     // 立直麻将专属字段
     public int honba; // 本场棒数
@@ -120,6 +133,8 @@ public partial class NormalGameStateManager : MonoBehaviour{
     public Dictionary<int, int[]> selfRiichiCandidateCuts = new Dictionary<int, int[]>();
     /// <summary>立直麻将：当前自家本巡食替禁切牌列表（吃来源 + 两面搭子的筋）。</summary>
     public HashSet<int> selfForbiddenCutTiles = new HashSet<int>();
+    /// <summary>强制出牌列表：长沙海底/开杠补张只能打这些摸入牌。</summary>
+    public HashSet<int> selfForcedCutTiles = new HashSet<int>();
     /// <summary>当前一轮询问切牌后操作下发的吃牌候选（立直麻将赤宝牌场景）。</summary>
     public Dictionary<string, int[][]> chiCandidates = new Dictionary<string, int[][]>();
 

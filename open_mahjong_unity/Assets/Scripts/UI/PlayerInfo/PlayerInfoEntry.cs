@@ -1,5 +1,3 @@
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
@@ -31,9 +29,43 @@ public class PlayerInfoEntry : MonoBehaviour{
         // 显示分支规则
         if (playerStatsCase == "mode"){
 
+            // 国标 mode 带 _rank 后缀表示天梯，否则自定义
+            bool isRank = (playerStatsInfo.rule == "guobiao"
+                           && playerStatsInfo.mode != null
+                           && playerStatsInfo.mode.EndsWith("_rank"));
+            string categorySuffix = (playerStatsInfo.rule == "guobiao")
+                ? (isRank ? "（天梯）" : "（自定义）")
+                : "";
+
             if (playerStatsInfo.rule == "guobiao"){
                 ShowText = "国标麻将";
-                
+
+                if (playerStatsInfo.mode == "4/4" || playerStatsInfo.mode == "4/4_rank"){
+                    ShowText += "全庄战";
+                }
+                else if (playerStatsInfo.mode == "3/4" || playerStatsInfo.mode == "3/4_rank"){
+                    ShowText += "西风战";
+                }
+                else if (playerStatsInfo.mode == "2/4" || playerStatsInfo.mode == "2/4_rank"){
+                    ShowText += "南风战";
+                }
+                else if (playerStatsInfo.mode == "1/4" || playerStatsInfo.mode == "1/4_rank"){
+                    ShowText += "东风战";
+                }
+            }
+            else if (playerStatsInfo.rule == "riichi"){
+                ShowText = "立直麻将";
+
+                if (playerStatsInfo.mode == "2/4"){
+                    ShowText += "南风战";
+                }
+                else if (playerStatsInfo.mode == "1/4"){
+                    ShowText += "东风战";
+                }
+            }
+            else if (playerStatsInfo.rule == "qingque"){
+                ShowText = "青雀麻将";
+
                 if (playerStatsInfo.mode == "4/4"){
                     ShowText += "全庄战";
                 }
@@ -47,19 +79,9 @@ public class PlayerInfoEntry : MonoBehaviour{
                     ShowText += "东风战";
                 }
             }
-            else if (playerStatsInfo.rule == "riichi"){
-                ShowText = "立直麻将";
-                
-                if (playerStatsInfo.mode == "2/4"){
-                    ShowText += "南风战";
-                }
-                else if (playerStatsInfo.mode == "1/4"){
-                    ShowText += "东风战";
-                }
-            }
-            else if (playerStatsInfo.rule == "qingque"){
-                ShowText = "青雀麻将";
-                
+            else if (playerStatsInfo.rule == "jiandan"){
+                ShowText = "简单麻将";
+
                 if (playerStatsInfo.mode == "4/4"){
                     ShowText += "全庄战";
                 }
@@ -89,10 +111,19 @@ public class PlayerInfoEntry : MonoBehaviour{
                     ShowText += " 东风战";
                 }
             }
+
+            // 国标追加场次分类后缀（（天梯）/（自定义））
+            if (playerStatsInfo.rule == "guobiao" && !string.IsNullOrEmpty(categorySuffix)){
+                ShowText += categorySuffix;
+            }
         }
         // 显示达成番数总计
         else if (playerStatsCase == "fanStats"){
-            if (playerStatsInfo.rule == "guobiao"){
+            // mode 为空时按规则回退默认标签（国标番数总计/日麻番数总计/...）
+            if (!string.IsNullOrEmpty(playerStatsInfo.mode)){
+                ShowText = playerStatsInfo.mode;
+            }
+            else if (playerStatsInfo.rule == "guobiao"){
                 ShowText = "国标番数总计";
             }
             else if (playerStatsInfo.rule == "riichi"){
@@ -100,6 +131,9 @@ public class PlayerInfoEntry : MonoBehaviour{
             }
             else if (playerStatsInfo.rule == "qingque"){
                 ShowText = "青雀番数总计";
+            }
+            else if (playerStatsInfo.rule == "jiandan"){
+                ShowText = "简单麻将番数总计";
             }
             else{
                 ShowText = "其他麻将达成番种总计:";
@@ -115,22 +149,22 @@ public class PlayerInfoEntry : MonoBehaviour{
         if (playerInfoPanel == null || playerStatsInfo == null){
             return;
         }
-        
+
         // 检查下一个子物体是否存在数据布局组
         int entryIndex = transform.GetSiblingIndex();
         Transform parent = transform.parent;
         bool hasDataLayout = false;
-        
+
         if (parent != null && entryIndex + 1 < parent.childCount){
             Transform nextChild = parent.GetChild(entryIndex + 1);
             if (nextChild != null && nextChild.name.Contains("DataLayoutGroup")){
                 hasDataLayout = true;
             }
         }
-        
+
         // 调用 ShowStatsData（如果已展开会删除，否则会创建）
         playerInfoPanel.ShowStatsData(playerStatsCase, playerStatsInfo, transform);
-        
+
         // 更新展开/收起状态（如果之前有数据布局组，现在应该收起；否则应该展开）
         isExpanded = !hasDataLayout;
         if (expandText != null){

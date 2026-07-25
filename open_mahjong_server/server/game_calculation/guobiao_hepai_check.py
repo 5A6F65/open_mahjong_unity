@@ -85,7 +85,7 @@ class Chinese_Hepai_Check:
         "quanbukao_dianhe":["menqianqing"],"quanbukao_zimo":["buqiuren"], # 全不靠 点和/自摸
         "zuhelong":[],"dayuwu":["wuzi"],"xiaoyuwu":["wuzi"],"sanfengke":[], # 组合龙 大于五 小于五 三风刻
         "hualong":[],"tuibudao":["queyimen"],"sansesantongshun":[],"sansesanjiegao":[], # 花龙 推不倒 三色三同顺 三色三节高
-        "wufanhe":[],"miaoshouhuichun":[],"haidilaoyue":[],"gangshangkaihua":["zimo"], # 无番和 妙手回春 海底捞月 杠上开花
+        "wufanhe":[],"miaoshouhuichun":["zimo"],"haidilaoyue":[],"gangshangkaihua":["zimo"], # 无番和 妙手回春 海底捞月 杠上开花
         "qiangganghe":["hejuezhang"],"pengpenghe":[],"hunyise":[],"sansesanbugao":[], # 抢杠和 碰碰和 混一色 一色三步高
         "wumenqi":[],"quanqiuren":["dandiaojiang"],"shuangangang":["shuanganke"], # 五门齐 全求人 双暗杠
         "shuangjianke":["yaojiuke"]*2,"quandaiyao":[],"buqiuren":["zimo"], # 双箭刻 全带幺 不求人
@@ -845,11 +845,12 @@ class Chinese_Hepai_Check:
                             player_tiles.fan_list.append("xixiangfeng") # 喜相逢
 
             # 根据同色手牌标记的距离判断 连六 老少副
+            # 连六按顺子对计数：仅当两侧起始点各有多余顺子时才复计（如 123123456456 计 2 次，123123456 只计 1 次）
             for list in [wan_list,bing_list,tiao_list]:
                 if len(list) >= 2:
-                    for i in list:
-                        i = int(i)
-                        if str(i + 3) in list:
+                    for rank in range(1, 7):
+                        pair_count = min(list.count(str(rank)), list.count(str(rank + 3)))
+                        for _ in range(pair_count):
                             player_tiles.fan_list.append("lianliu") # 连六
                 min_count = min(list.count("2"),list.count("8"))
                 if min_count != 0:
@@ -898,9 +899,11 @@ class Chinese_Hepai_Check:
                     all_list.append(sign[1])
             
             if len(all_list) == 4:
-                if all(i in ["2","4","6","8"] for i in all_list):
-                    if save_quetou_sign[0][1] in ["2","4","6","8"]:
-                        player_tiles.fan_list.append("quanshuangke") # 全双刻
+                if all(i in ("2","4","6","8") for i in all_list):
+                    if save_quetou_sign:
+                        quetou_id = int(save_quetou_sign[0])
+                        if quetou_id < 40 and quetou_id % 10 in (2, 4, 6, 8):
+                            player_tiles.fan_list.append("quanshuangke") # 全双刻
 
             already_count_list = []
             self.debug_print(all_list)
@@ -994,9 +997,9 @@ class Chinese_Hepai_Check:
                         player_tiles.fan_list.append("dandiaojiang") # 单吊将
                         continue
 
-                # 开始判断传参番种 包括 妙手回春 杠上开花 抢杠和 和绝张 花牌 海底捞月 全求人 门前清 不求人 自摸
-                case "妙手回春":
-                    player_tiles.fan_list.append("miaoshouhuichun") # 妙手回春
+                # 开始判断传参番种 包括 last_deal 杠上开花 抢杠和 和绝张 花牌 last_cut 全求人 门前清 不求人 自摸
+                case "last_deal" | "妙手回春":
+                    player_tiles.fan_list.append("miaoshouhuichun") # 妙手回春（牌墙空自摸）
                 case "杠上开花":
                     player_tiles.fan_list.append("gangshangkaihua") # 杠上开花
                 case "抢杠和":
@@ -1005,8 +1008,8 @@ class Chinese_Hepai_Check:
                     player_tiles.fan_list.append("hejuezhang") # 和绝张
                 case "花牌":
                     player_tiles.fan_list.append("huapai") # 花牌
-                case "海底捞月":
-                    player_tiles.fan_list.append("haidilaoyue") # 海底捞月
+                case "last_cut" | "海底捞月":
+                    player_tiles.fan_list.append("haidilaoyue") # 海底捞月（牌墙空荣和）
                 case "点和":
                     self.debug_print(player_tiles.combination_list)
                     if combination_str != "" and all(i not in ["S","K","G","z"] for i in combination_str) and "和单张" in way_to_hepai:
@@ -1190,7 +1193,7 @@ class Chinese_Hepai_Check:
 
         # 判断前处理 处理get_tile
         zimo_or_not = False
-        if any(i in ["妙手回春","自摸","杠上开花"] for i in way_to_hepai):
+        if any(i in ["last_deal", "妙手回春", "自摸", "杠上开花"] for i in way_to_hepai):
             zimo_or_not = True
         if zimo_or_not == False:
             # 如果和牌张来自外部 暗杠转为明杠 暗刻转为明刻 暗顺明顺仅用于标识是否副露 不用转换 标记暗转明用于后续计算门前清
@@ -1400,7 +1403,7 @@ if __name__ == "__main__":
     
     # 选择一种和牌方式
     way_to_hepai = []
-    way_to_hepai.append(random.choice(["荣和","自摸","抢杠和","妙手回春","海底捞月","岭上开花"])) # 1级传参 和牌方式
+    way_to_hepai.append(random.choice(["荣和","自摸","抢杠和","last_deal","last_cut","岭上开花"])) # 1级传参 和牌方式
     way_to_hepai.append(random.choice(["场风东","场风南","场风西","场风北"])) # 2级传参 自身位置
     way_to_hepai.append(random.choice(["自风东","自风南","自风西","自风北"]))
     if random.randint(0,100) < 50:
@@ -1621,8 +1624,8 @@ if __name__ == "__main__":
     # test_save = [["k28","s13"],[13,14,15,35,36,37,42,42],15,["点和"]] # 8
     # 2 test_save = [["s22","s16","s27"],[32,33,34,44,44],32,["点和"]] 8
     # 3 test_save = [["k37"],[12,12,12,17,18,19,23,23,23,45,45],23,["点和"]] 8
-    # 妙手回春 海底捞月 杠上开花 抢杠和 花牌
-    # 1 test_save = [["k37"],[12,12,12,17,18,19,23,23,23,45,45],23,["妙手回春","海底捞月","杠上开花","抢杠和","花牌","花牌"]]
+    # last_deal(妙手回春) last_cut(海底捞月) 杠上开花 抢杠和 花牌
+    # 1 test_save = [["k37"],[12,12,12,17,18,19,23,23,23,45,45],23,["last_deal","last_cut","杠上开花","抢杠和","花牌","花牌"]]
     # 碰碰和
     # 1 test_save = [["k32","g46"],[13,13,13,25,25,25,45,45],25,["点和"]] 9
     # 2 test_save = [["k31","k23","k28"],[11,11,16,16,16],16,["自摸"]] 9

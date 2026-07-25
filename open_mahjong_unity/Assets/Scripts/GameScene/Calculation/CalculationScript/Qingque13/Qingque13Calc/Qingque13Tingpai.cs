@@ -35,6 +35,9 @@ namespace Qingque13
     // 中国麻将听牌检查类
     public class Qingque_Tingpai_Check
     {
+        // 十三幺 (国士无双) / 混幺九 检查使用的幺九牌集合
+        private static readonly HashSet<int> yaojiu = new HashSet<int> { 11, 19, 21, 29, 31, 39, 41, 42, 43, 44, 45, 46, 47 };
+
         private HashSet<int> waiting_tiles;
         private bool debug;
 
@@ -63,6 +66,7 @@ namespace Qingque13
 
             if (player_tiles.hand_tiles.Count == 13)
             {
+                GS_check(player_tiles.hand_tiles);  // 十三幺检查
                 QD_check(player_tiles.hand_tiles);  // 七对子检查
             }
 
@@ -71,6 +75,50 @@ namespace Qingque13
             DebugPrint("等待牌: {0}", string.Join(", ", waiting_tiles));
 
             return waiting_tiles;
+        }
+
+        private void GS_check(List<int> hand_tiles)
+        {
+            // 检查十三幺 (国士无双)
+            // 手牌必须全部是幺九牌 (1,9 和字牌)
+            HashSet<int> GS_step_set = new HashSet<int>();
+            bool GS_allowed = true;
+
+            foreach (int tile_id in hand_tiles)
+            {
+                if (yaojiu.Contains(tile_id))
+                {
+                    GS_step_set.Add(tile_id);
+                }
+                else
+                {
+                    GS_allowed = false;
+                }
+            }
+
+            // 如果牌都是幺九，并且满足12种（听第13种）或13种（听任意幺九牌）
+            if (GS_allowed)
+            {
+                if (GS_step_set.Count == 12)
+                {
+                    // 12 unique terminal/honour tiles: waiting for the missing 13th
+                    foreach (int i in yaojiu)
+                    {
+                        if (!hand_tiles.Contains(i))
+                        {
+                            waiting_tiles.Add(i);
+                        }
+                    }
+                }
+                else if (GS_step_set.Count == 13)
+                {
+                    // 13 unique terminal/honour tiles: waiting for any of them (pair wait)
+                    foreach (int i in yaojiu)
+                    {
+                        waiting_tiles.Add(i);
+                    }
+                }
+            }
         }
 
         private void QD_check(List<int> hand_tiles)
@@ -179,7 +227,7 @@ namespace Qingque13
                     {
                         int tile1 = i.hand_tiles[0];
                         int tile2 = i.hand_tiles[1];
-                        
+
                         if (tile1 == tile2)
                         {
                             waiting_tiles_list.Add(tile1); // 对碰型
@@ -300,8 +348,8 @@ namespace Qingque13
                 // Ensure tile_id+2 doesn't exceed x9 boundary (19, 29, 39) or reach honor tiles (40+)
                 if (tile_id <= 37 && (tile_id % 10) <= 7)
                 {
-                    if (player_tiles.hand_tiles.Contains(tile_id + 1) && 
-                        player_tiles.hand_tiles.Contains(tile_id + 2) && 
+                    if (player_tiles.hand_tiles.Contains(tile_id + 1) &&
+                        player_tiles.hand_tiles.Contains(tile_id + 2) &&
                         tile_id != same_tile_id)
                     {
                         PlayerTilesTingpai temp_list = player_tiles.DeepCopy();

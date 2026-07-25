@@ -6,10 +6,15 @@ using UnityEngine;
 
 /// <summary>四川血战牌谱/观战：中途和牌补花区摆牌与终局分步结算回放。</summary>
 public partial class GameRecordManager {
-    private bool IsSichuanBloodBattleRecord() {
+    /// <summary>四川规则牌谱（含血战/非血战）。杠后摸牌与普通摸牌同向从头取，不用倒序岭上。</summary>
+    private bool IsSichuanRecord() {
         if (gameRecord?.gameTitle == null) return false;
         string subRule = ReadGameTitleString(gameRecord.gameTitle, "sub_rule", "").ToLowerInvariant();
-        if (!subRule.StartsWith("sichuan")) return false;
+        return subRule.StartsWith("sichuan");
+    }
+
+    private bool IsSichuanBloodBattleRecord() {
+        if (!IsSichuanRecord()) return false;
         string bloodBattle = ReadGameTitleString(gameRecord.gameTitle, "blood_battle", "true");
         return bloodBattle != "false";
     }
@@ -55,8 +60,8 @@ public partial class GameRecordManager {
         GameCanvas.Instance.ShowGangScoreFloats(changes);
     }
 
+    /// <summary>血战中途和牌：仅当 score_changes 全 0 时视为延迟入账。</summary>
     private static bool IsDeferredSichuanHuScore(int huScore, int[] scoreChanges) {
-        if (huScore != 0) return false;
         if (scoreChanges == null) return true;
         foreach (int c in scoreChanges) {
             if (c != 0) return false;
@@ -83,22 +88,16 @@ public partial class GameRecordManager {
 
     private void SyncRecordRonDiscardRemoved(string discarderPos, int tileId) {
         if (string.IsNullOrEmpty(discarderPos) || !recordPlayer_to_info.TryGetValue(discarderPos, out RecordPlayer rp)) return;
-        if (rp.discardTiles == null || rp.discardTiles.Count == 0) return;
-        if (tileId >= 10) {
-            int idx = rp.discardTiles.LastIndexOf(tileId);
-            if (idx >= 0) rp.discardTiles.RemoveAt(idx);
-            else rp.discardTiles.RemoveAt(rp.discardTiles.Count - 1);
-        } else {
-            rp.discardTiles.RemoveAt(rp.discardTiles.Count - 1);
-        }
-        if (rp.discardRiichiFlags != null && rp.discardRiichiFlags.Count > 0) {
-            rp.discardRiichiFlags.RemoveAt(rp.discardRiichiFlags.Count - 1);
-        }
+        // 荣和回收河牌与吃碰一致：末张优先 + 同步摸切/横置并行数组
+        RemoveClaimedDiscardFromRecordRiver(rp, tileId, capturePendingRiichiHorizontal: false);
     }
 
     private string ResolveRecordRonDiscarderPosition(int? ronDiscarderIndex) {
-        if (ronDiscarderIndex.HasValue && indexToPosition.TryGetValue(ronDiscarderIndex.Value, out string pos)) {
-            return pos;
+        if (ronDiscarderIndex.HasValue && indexToPosition.TryGetValue(ronDiscarderIndex.Value, out string fromTick)) {
+            return fromTick;
+        }
+        if (lastJiagangPlayerIndex >= 0 && indexToPosition.TryGetValue(lastJiagangPlayerIndex, out string jgPos)) {
+            return jgPos;
         }
         if (lastDiscardPlayerIndex >= 0 && indexToPosition.TryGetValue(lastDiscardPlayerIndex, out string fallback)) {
             return fallback;
@@ -119,10 +118,19 @@ public partial class GameRecordManager {
     private IEnumerator CoPlaySichuanMidGameHuRecord(
         string action, int hepaiPlayerIndex, int hepaiTile, bool multiRon,
         int? ronDiscarderIndex, bool recycleDiscard, bool isQianggang) {
-        yield return HepaiRevealDirector.PlaySichuanMidGame(
-            hepaiPlayerIndex, action, hepaiTile, multiRon, ronDiscarderIndex, recycleDiscard, isQianggang);
+        string discardPos = ResolveRecordRonDiscarderPosition(ronDiscarderIndex);
+        if (action != "hu_self") {
+            int syncTile = hepaiTile >= 10 ? hepaiTile : lastWinnableTileId;
+            Game3DManager.Instance.SyncRecordLastDiscardForRon(discardPos, syncTile);
+        }
+        if (!indexToPosition.TryGetValue(hepaiPlayerIndex, out string winnerPos)) yield break;
+
+        HepaiPresentationRequest request = HepaiRevealDirector.BuildSichuanMidGameRequest(
+            winnerPos, action, hepaiTile, multiRon, ronDiscarderIndex, recycleDiscard, isQianggang);
+        request.DiscardPlayerPosition = discardPos;
+        yield return Game3DManager.Instance.PlaySichuanMidGameHu(request);
         if (action != "hu_self" && recycleDiscard) {
-            SyncRecordRonDiscardRemoved(ResolveRecordRonDiscarderPosition(ronDiscarderIndex), hepaiTile);
+            SyncRecordRonDiscardRemoved(discardPos, hepaiTile);
         }
         yield return new WaitForSeconds(1.5f);
     }
@@ -181,7 +189,7 @@ public partial class GameRecordManager {
 
     private void HandleSichuanRecordRevealHu(List<string> tick) {
         if (tick.Count < 3) return;
-        NormalGameStateManager.Instance?.BeginSichuanEndgameScoreAccum();
+        NormalGameStateManager.Instance.BeginSichuanEndgameScoreAccum();
         Dictionary<int, int[]> allHands = ParseRecordHuHandsJson(tick[2]);
         if (allHands.Count > 0) {
             RoundEndPresentation.Instance.ResetSichuanEndgameQueue();
@@ -252,21 +260,6 @@ public partial class GameRecordManager {
             Debug.LogWarning($"[GameRecord] chajiao hand parse failed: {e.Message}");
             return null;
         }
-    }
-
-    private static Dictionary<int, string> ParseRecordStatusJson(string json) {
-        var result = new Dictionary<int, string>();
-        if (string.IsNullOrEmpty(json)) return result;
-        try {
-            JObject obj = JObject.Parse(json);
-            foreach (var prop in obj.Properties()) {
-                if (!int.TryParse(prop.Name, out int idx)) continue;
-                result[idx] = prop.Value?.Value<string>() ?? "no_ting";
-            }
-        } catch (Exception e) {
-            Debug.LogWarning($"[GameRecord] chajiao status parse failed: {e.Message}");
-        }
-        return result;
     }
 
     private void HandleSichuanRecordChaRefund(List<string> tick) {

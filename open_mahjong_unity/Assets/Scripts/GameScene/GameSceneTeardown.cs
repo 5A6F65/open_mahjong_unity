@@ -5,6 +5,7 @@ public static class GameSceneTeardown {
     public static void ResetToIdle() {
         if (GameRecordManager.Instance != null) {
             GameRecordManager.Instance.ClearRecordChongHintVisuals();
+            GameRecordManager.Instance.HideRecordTips();
         }
 
         if (Game3DManager.Instance != null) {
@@ -39,6 +40,8 @@ public static class GameSceneTeardown {
         if (ExitButtonManager.Instance != null) {
             ExitButtonManager.Instance.HideAll();
         }
+
+        VotePanel.Instance?.Hide();
 
         if (RankChangePanel.Instance != null) {
             RankChangePanel.Instance.gameObject.SetActive(false);

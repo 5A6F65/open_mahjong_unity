@@ -4,7 +4,10 @@ import logging
 import asyncio
 import time
 from ..public.ai.auto_cut_ai import auto_cut_action
+from ..public.offline import offline_auto_action
 from ..public.ai.smart_bot_ai import smart_bot_action
+from ..public.deal_tile_view import sanitize_deal_tile_for_viewer
+from ..public.hand_slot_utils import bot_ask_hand_game_status
 
 logger = logging.getLogger(__name__)
 
@@ -121,17 +124,17 @@ async def broadcast_ask_hand_action(self):
             if "offline" in current_player.tag_list:
                 logger.info(f"玩家 {current_player.username} 已掉线，跳过广播")
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(offline_auto_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             
             # 如果是机器人，启动自动操作并跳过广播
             if current_player.user_id == 0:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             elif current_player.user_id == 2:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             
             if i == self.current_player_index:
@@ -196,7 +199,7 @@ async def broadcast_ask_other_action(self):
             if "offline" in current_player.tag_list:
                 logger.info(f"玩家 {current_player.username} 已掉线，跳过广播")
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(offline_auto_action(self, i, self.action_dict[i], self.game_status))
                 continue
             
             # 如果是机器人，启动自动操作并跳过广播
@@ -327,13 +330,13 @@ async def broadcast_do_action(
     combination_target: str = None,
     combination_mask: List[int] = None,
     is_mo_gang: bool = None,
+    cut_from_player: int = None,
     ):
     self.server_action_tick += 1
     if hasattr(self, "_ask_broadcast_time"):
         delattr(self, "_ask_broadcast_time")
     # 遍历列表时获取索引
     for i, current_player in enumerate(self.player_list):
-        print(f"广播操作: action_list={action_list}, action_player={action_player}, cut_tile={cut_tile}, cut_class={cut_class}, cut_tile_index={cut_tile_index}, deal_tile={deal_tile}, buhua_tile={buhua_tile}, combination_target={combination_target}, combination_mask={combination_mask}")
         try:
             # 如果玩家掉线，跳过广播
             if "offline" in current_player.tag_list:
@@ -348,6 +351,10 @@ async def broadcast_do_action(
             if current_player.user_id in self.game_server.user_id_to_connection:
                 player_conn = self.game_server.user_id_to_connection[current_player.user_id]
 
+                viewer_deal_tile = sanitize_deal_tile_for_viewer(
+                    deal_tile, action_player, current_player.player_index
+                )
+
                 response = Response(
                     type="gamestate/classical/do_action",
                     success=True,
@@ -359,11 +366,12 @@ async def broadcast_do_action(
                         cut_tile=cut_tile,
                         cut_class=cut_class,
                         cut_tile_index = cut_tile_index,
-                        deal_tile=deal_tile,
+                        deal_tile=viewer_deal_tile,
                         buhua_tile=buhua_tile,
                         combination_mask=combination_mask,
                         combination_target=combination_target,
                         is_mo_gang=is_mo_gang,
+                        cut_from_player=cut_from_player,
                     )
                 )
                 await player_conn.websocket.send_json(response.dict(exclude_none=True))
@@ -620,6 +628,7 @@ async def broadcast_shuhewei(
     hepai_player_index: Optional[int],
     hepai_player_hand: Optional[List[int]] = None,
     hepai_player_combination_mask: Optional[List[List[int]]] = None,
+    next_status: Optional[str] = None,
 ):
     self.server_action_tick += 1
     for i, current_player in enumerate(self.player_list):
@@ -644,6 +653,7 @@ async def broadcast_shuhewei(
                         hepai_player_index=hepai_player_index,
                         hepai_player_hand=hepai_player_hand,
                         hepai_player_combination_mask=hepai_player_combination_mask,
+                        next_status=next_status,
                     )
                 )
                 await player_conn.websocket.send_json(response.dict(exclude_none=True))

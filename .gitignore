@@ -1,5 +1,6 @@
-# 忽略 VSCode 配置文件夹
+# 忽略 VSCode / Cursor 本地配置
 .vscode/
+.cursor/
 
 # 忽略 Unity 项目目录下的所有内容
 open_mahjong_unity/**
@@ -53,9 +54,23 @@ open_mahjong_server/logs/
 # Web项目：只忽略不需要的文件和目录
 open_mahjong_web/node_modules/*
 open_mahjong_web/client/node_modules/*
+open_mahjong_web/.env
+open_mahjong_web/.env.local
+open_mahjong_web/.env.*.local
 
 # 不忽略.gitignore
 !.gitignore
 
 
+
+
+# Private keys (do not commit)
+*.pem
+
+# 本地隔离工作区：密钥 / 部署打包 / 临时文件（仅保留 README）
+.om_workspace/*
+!.om_workspace/README.md
+
+# 已废弃的部署暂存目录（误提交过，勿再使用）
+.deploy_staging/
 

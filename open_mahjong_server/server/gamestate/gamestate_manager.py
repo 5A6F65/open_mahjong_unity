@@ -6,9 +6,11 @@ from typing import Dict, Any, Optional
 from .game_guobiao.GuobiaoGameState import GuobiaoGameState
 from ..response import Response, MessageInfo
 from .game_mmcr.QingqueGameState import QingqueGameState
+from .game_changsha.ChangshaGameState import ChangshaGameState
 from .game_classical.ClassicalGameState import ClassicalGameState
 from .game_riichi.RiichiGameState import RiichiGameState
 from .game_sichuan.SichuanGameState import SichuanGameState
+from .game_jiandan.JiandanGameState import JiandanGameState
 logger = logging.getLogger(__name__)
 
 class GameStateManager:
@@ -25,9 +27,11 @@ class GameStateManager:
         # 管理不同房间id到已启动的游戏服务的映射（仅用于开始游戏时检查，之后不再使用）
         self.room_id_to_GuobiaoGameState: Dict[str, GuobiaoGameState] = {}
         self.room_id_to_QingqueGameState: Dict[str, QingqueGameState] = {}
+        self.room_id_to_ChangshaGameState: Dict[str, ChangshaGameState] = {}
         self.room_id_to_ClassicalGameState: Dict[str, ClassicalGameState] = {}
         self.room_id_to_RiichiGameState: Dict[str, RiichiGameState] = {}
         self.room_id_to_SichuanGameState: Dict[str, SichuanGameState] = {}
+        self.room_id_to_JiandanGameState: Dict[str, JiandanGameState] = {}
         # gamestate_id 到游戏状态的映射（主要管理方式）
         self.gamestate_id_to_game_state: Dict[str, Any] = {}
         # 用户ID到游戏状态的映射（用于快速查找玩家所在的活跃游戏）
@@ -151,6 +155,34 @@ class GameStateManager:
                         del self.gamestate_id_to_game_state[game_state.gamestate_id]
                     del self.room_id_to_QingqueGameState[room_id]
                 return Response(type="error_message", success=False, message=f"启动游戏失败: {str(e)}")
+        elif room_rule == "changsha":
+            try:
+                gamestate_id = str(uuid.uuid4())
+
+                game_state = ChangshaGameState(
+                    self.game_server,
+                    room_data,
+                    self.game_server.calculation_service,
+                    self.game_server.db_manager,
+                    gamestate_id
+                )
+                self.room_id_to_ChangshaGameState[room_id] = game_state
+                self.gamestate_id_to_game_state[gamestate_id] = game_state
+
+                for player_id in room_data["player_list"]:
+                    self.user_id_to_game_state[player_id] = game_state
+
+                game_state.game_task = asyncio.create_task(game_state.run_game_loop())
+                logger.info(f"房间 {room_id} 的长沙麻将游戏已启动，gamestate_id: {gamestate_id}")
+            except Exception as e:
+                logger.error(f"创建长沙麻将游戏任务时发生异常，room_id: {room_id}, 错误: {e}", exc_info=True)
+                room_data["is_game_running"] = False
+                if room_id in self.room_id_to_ChangshaGameState:
+                    game_state = self.room_id_to_ChangshaGameState[room_id]
+                    if hasattr(game_state, 'gamestate_id') and game_state.gamestate_id in self.gamestate_id_to_game_state:
+                        del self.gamestate_id_to_game_state[game_state.gamestate_id]
+                    del self.room_id_to_ChangshaGameState[room_id]
+                return Response(type="error_message", success=False, message=f"启动游戏失败: {str(e)}")
         elif room_rule == "classical":
             try:
                 gamestate_id = str(uuid.uuid4())
@@ -235,6 +267,31 @@ class GameStateManager:
                         del self.gamestate_id_to_game_state[game_state.gamestate_id]
                     del self.room_id_to_SichuanGameState[room_id]
                 return Response(type="error_message", success=False, message=f"启动游戏失败: {str(e)}")
+        elif room_rule == "jiandan":
+            try:
+                gamestate_id = str(uuid.uuid4())
+                game_state = JiandanGameState(
+                    self.game_server,
+                    room_data,
+                    self.game_server.calculation_service,
+                    self.game_server.db_manager,
+                    gamestate_id,
+                )
+                self.room_id_to_JiandanGameState[room_id] = game_state
+                self.gamestate_id_to_game_state[gamestate_id] = game_state
+                for player_id in room_data["player_list"]:
+                    self.user_id_to_game_state[player_id] = game_state
+                game_state.game_task = asyncio.create_task(game_state.run_game_loop())
+                logger.info(f"房间 {room_id} 的简单麻将游戏已启动，gamestate_id: {gamestate_id}")
+            except Exception as e:
+                logger.error(f"创建简单麻将游戏任务时发生异常，room_id: {room_id}, 错误: {e}", exc_info=True)
+                room_data["is_game_running"] = False
+                if room_id in self.room_id_to_JiandanGameState:
+                    game_state = self.room_id_to_JiandanGameState[room_id]
+                    if hasattr(game_state, 'gamestate_id') and game_state.gamestate_id in self.gamestate_id_to_game_state:
+                        del self.gamestate_id_to_game_state[game_state.gamestate_id]
+                    del self.room_id_to_JiandanGameState[room_id]
+                return Response(type="error_message", success=False, message=f"启动游戏失败: {str(e)}")
         else:
             return Response(type="error_message", success=False, message="房间类型不支持")
         return None
@@ -283,8 +340,12 @@ class GameStateManager:
             game_state = self.user_id_to_game_state[user_id]
             await game_state.player_disconnect(user_id)
         # 观战者断开时，需从所有 gamestate 的 spectator_manager 中移除
+        await self.remove_spectator_from_all_games(user_id)
+    
+    async def remove_spectator_from_all_games(self, user_id: int):
+        """从所有进行中对局的延时观战列表移除用户（退出观战、加入匹配等场景）。"""
         for game_state in list(self.gamestate_id_to_game_state.values()):
-            if hasattr(game_state, 'spectator_manager') and game_state.spectator_manager:
+            if hasattr(game_state, "remove_spectator"):
                 await game_state.remove_spectator(user_id)
     
     async def player_reconnect(self, user_id: int):
@@ -297,6 +358,10 @@ class GameStateManager:
         if user_id in self.user_id_to_game_state:
             game_state = self.user_id_to_game_state[user_id]
             await game_state.player_reconnect(user_id)
+            # 自定义房间投票/暂停进行中时，向重连玩家补发 vote_update
+            vm = getattr(game_state, "vote_manager", None)
+            if vm is not None:
+                await vm.sync_to_user(user_id)
     
     def remove_player_from_game_state(self, user_id: int):
         """
@@ -323,12 +388,16 @@ class GameStateManager:
             return self.room_id_to_GuobiaoGameState.get(room_id)
         elif room_id in self.room_id_to_QingqueGameState:
             return self.room_id_to_QingqueGameState.get(room_id)
+        elif room_id in self.room_id_to_ChangshaGameState:
+            return self.room_id_to_ChangshaGameState.get(room_id)
         elif room_id in self.room_id_to_ClassicalGameState:
             return self.room_id_to_ClassicalGameState.get(room_id)
         elif room_id in self.room_id_to_RiichiGameState:
             return self.room_id_to_RiichiGameState.get(room_id)
         elif room_id in self.room_id_to_SichuanGameState:
             return self.room_id_to_SichuanGameState.get(room_id)
+        elif room_id in self.room_id_to_JiandanGameState:
+            return self.room_id_to_JiandanGameState.get(room_id)
         return None
     
     def get_game_state_by_gamestate_id(self, gamestate_id: str) -> Optional[Any]:
@@ -463,12 +532,16 @@ class GameStateManager:
             del self.room_id_to_GuobiaoGameState[game_state.room_id]
         elif game_state.room_id in self.room_id_to_QingqueGameState:
             del self.room_id_to_QingqueGameState[game_state.room_id]
+        elif game_state.room_id in self.room_id_to_ChangshaGameState:
+            del self.room_id_to_ChangshaGameState[game_state.room_id]
         elif game_state.room_id in self.room_id_to_ClassicalGameState:
             del self.room_id_to_ClassicalGameState[game_state.room_id]
         elif game_state.room_id in self.room_id_to_RiichiGameState:
             del self.room_id_to_RiichiGameState[game_state.room_id]
         elif game_state.room_id in self.room_id_to_SichuanGameState:
             del self.room_id_to_SichuanGameState[game_state.room_id]
+        elif game_state.room_id in self.room_id_to_JiandanGameState:
+            del self.room_id_to_JiandanGameState[game_state.room_id]
         
         # 3. 清理 gamestate_id 到游戏状态的映射
         if gamestate_id and gamestate_id in self.gamestate_id_to_game_state:

@@ -140,13 +140,25 @@ public partial class GameCanvas{
         }
         return "自摸";
     }
+
     private string GetActionDisplayText(string actionType, string roomRule) {
         if (actionType == "chi_left" || actionType == "chi_mid" || actionType == "chi_right"){
             return "吃";
         } else if (actionType == "peng"){
             return "碰";
-        } else if (actionType == "angang" || actionType == "jiagang" || actionType == "gang"){
+        } else if (actionType == "angang"){
+            if (roomRule == "changsha") return "开杠";
+            return "暗杠";
+        } else if (actionType == "buzhang"){
+            return "补张";
+        } else if (actionType == "jiagang"){
+            if (roomRule == "changsha") return "开杠";
+            return "加杠";
+        } else if (actionType == "gang"){
+            if (roomRule == "changsha") return "开杠";
             return "杠";
+        } else if (actionType == "initial_hu") {
+            return "起手胡";
         } else if (actionType == "hu" || actionType == "hu_self" || actionType == "hu_first" || actionType == "hu_second" || actionType == "hu_third"){
             GameRecordManager.ResolveActionRuleContext(roomRule, null, out string rule, out string subRule);
             if (actionType == "hu_self"){
@@ -155,29 +167,12 @@ public partial class GameCanvas{
             if (rule == "riichi" || (!string.IsNullOrEmpty(subRule) && subRule.StartsWith("riichi/"))) return "荣";
             return "和";
         } else if (actionType == "buhua"){
+            if (roomRule == "changsha") return string.Empty;
             return "补花";
         } else if (actionType == "riichi"){
             return "立直";
         }
         return string.Empty;
-    }
-    /// <summary>
-    /// 观战用：显示和正常对局一致的操作按钮，但全部禁用（点击无效）。
-    /// </summary>
-    public void ShowSpectatorActionButtons(List<string> actionList) {
-        ClearActionButton();
-        if (actionList == null || actionList.Count == 0) {
-            return;
-        }
-        SetActionButton(actionList);
-        // 观战只展示按钮：移除点击回调（外观保持正常，点击无反应）
-        foreach (Transform child in ActionButtonContainer) {
-            Button btn = child.GetComponent<Button>();
-            if (btn != null) {
-                btn.interactable = true;
-                btn.onClick.RemoveAllListeners();
-            }
-        }
     }
     // 渐变消失协程
     private IEnumerator FadeOutActionDisplay(GameObject actionTextObj,Transform displayPos) {
@@ -215,4 +210,3 @@ public partial class GameCanvas{
         }
     }
 }
-

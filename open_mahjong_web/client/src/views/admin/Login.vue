@@ -19,7 +19,7 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAdminAuthStore } from '@/stores/adminAuth'
@@ -30,13 +30,34 @@ const auth = useAdminAuthStore()
 const loading = ref(false)
 const form = reactive({ username: '', password: '' })
 
+function resolveAdminRedirect() {
+  const redirect = route.query.redirect
+  if (
+    typeof redirect === 'string' &&
+    redirect.startsWith('/admin') &&
+    !redirect.startsWith('/admin/login')
+  ) {
+    return redirect
+  }
+  return '/admin'
+}
+
+async function goAdmin() {
+  const target = resolveAdminRedirect()
+  await router.replace(target)
+}
+
+onMounted(async () => {
+  if (!auth.loaded) await auth.fetchMe()
+  if (auth.isLoggedIn) await goAdmin()
+})
+
 async function onSubmit() {
   loading.value = true
   try {
     await auth.login(form.username, form.password)
     ElMessage.success('登录成功')
-    const redirect = route.query.redirect
-    router.replace(typeof redirect === 'string' && redirect.startsWith('/admin') ? redirect : '/admin')
+    await goAdmin()
   } catch (e) {
     ElMessage.error(e.response?.data?.message || '登录失败')
   } finally {
@@ -54,8 +75,11 @@ async function onSubmit() {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 .login-card {
-  width: 400px;
+  width: 100%;
+  max-width: 400px;
+  margin: 0 16px;
   padding: 8px;
+  box-sizing: border-box;
 }
 .login-card h1 {
   margin: 0 0 8px;

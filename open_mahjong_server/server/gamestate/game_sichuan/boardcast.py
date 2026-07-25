@@ -9,10 +9,55 @@ import logging
 import asyncio
 import time
 from ..public.ai.auto_cut_ai import auto_cut_action
+from ..public.offline import offline_auto_action
 from ..public.ai.smart_bot_ai import smart_bot_action
+from ..public.deal_tile_view import sanitize_deal_tile_for_viewer
+from ..public.hand_slot_utils import bot_ask_hand_game_status
+from ..public.claim_protection import (
+    claim_protection_enabled,
+    is_protected_viewer,
+    stash_protected_cut_payload,
+    arm_claim_protection_timer,
+    prepare_protected_meld_for_viewers,
+    end_claim_protection_interval,
+    mark_post_meld_gap,
+    take_post_meld_gap_delay,
+    REAL_MELD_ACTIONS,
+)
 from .shunhe import tag_list_for_viewer
 
+from ..public.ask_timing import begin_ask_round, note_ask_delivered, reconnect_remaining_time
+
 logger = logging.getLogger(__name__)
+
+
+async def _send_ask_response_to_viewer(
+    self, viewer_index: int, response, *, block: bool = True
+) -> None:
+    """经 outbound_pipe 发送 ask。
+
+    block=True：await（当前行动者）；block=False：仅 schedule（旁观不拖主循环）。
+    """
+    from ..public.outbound_pipe import send_to_viewer, schedule_viewer_send
+
+    current_player = self.player_list[viewer_index]
+    if current_player.user_id not in self.game_server.user_id_to_connection:
+        logger.warning(
+            f"玩家 {current_player.username} (user_id={current_player.user_id}) 未连接，跳过 ask 广播"
+        )
+        return
+    player_conn = self.game_server.user_id_to_connection[current_player.user_id]
+    delay_before = take_post_meld_gap_delay(self, viewer_index)
+
+    async def _do():
+        await player_conn.websocket.send_json(response.dict(exclude_none=True))
+        await self.send_to_realtime_spectators(viewer_index, response)
+        note_ask_delivered(self, viewer_index)
+
+    if block:
+        await send_to_viewer(self, viewer_index, _do, delay_before=delay_before)
+    else:
+        schedule_viewer_send(self, viewer_index, _do, delay_before=delay_before)
 
 
 def _build_players_info(self, viewer_user_id: Optional[int]):
@@ -73,6 +118,7 @@ def _base_game_info(self):
         'open_cuohe': getattr(self, 'open_cuohe', False),
         'show_moqie_hint': getattr(self, 'show_moqie_hint', False),
         'tactical_call': getattr(self, 'tactical_call', False),
+        'claim_protection': getattr(self, 'claim_protection', False),
         'isPlayerSetRandomSeed': self.isPlayerSetRandomSeed,
         'blood_battle': getattr(self, 'blood_battle', True),
         'dealer_index': getattr(self, 'dealer_index', 0),
@@ -109,14 +155,15 @@ async def broadcast_game_start(self):
 async def broadcast_dingque_ask(self):
     """定缺阶段：询问四家选择缺门花色（action_list=['dingque']）。"""
     self.server_action_tick += 1
-    self._ask_broadcast_time = time.time()
+    begin_ask_round(self)
     for i, current_player in enumerate(self.player_list):
         try:
             if "offline" in current_player.tag_list:
                 if self.action_dict.get(i, []):
                     asyncio.create_task(_auto_dingque(self, i))
                 continue
-            if current_player.user_id in (0, 2):
+            # 机器人 user_id < 10 整段自动定缺（与国标/长沙等规则一致）
+            if current_player.user_id < 10:
                 if self.action_dict.get(i, []):
                     asyncio.create_task(_auto_dingque(self, i))
                 continue
@@ -154,7 +201,7 @@ async def broadcast_dingque_done(self):
     player_to_dingque = {p.player_index: getattr(p, 'dingque_suit', 0) for p in self.player_list}
     for current_player in self.player_list:
         try:
-            if "offline" in current_player.tag_list or current_player.user_id == 0:
+            if "offline" in current_player.tag_list or current_player.user_id < 10:
                 continue
             if current_player.user_id in self.game_server.user_id_to_connection:
                 player_conn = self.game_server.user_id_to_connection[current_player.user_id]
@@ -174,52 +221,67 @@ async def broadcast_dingque_done(self):
 
 async def broadcast_ask_hand_action(self):
     self.server_action_tick += 1
-    self._ask_broadcast_time = time.time()
-    for i, current_player in enumerate(self.player_list):
+    begin_ask_round(self)
+    # 当前行动者优先 await；其余座位 schedule，避免 post_gap/延迟鸣牌卡住出牌权
+    seat_order = [self.current_player_index] + [
+        i for i in range(len(self.player_list)) if i != self.current_player_index
+    ]
+    for i in seat_order:
+        current_player = self.player_list[i]
         try:
             if "offline" in current_player.tag_list:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(offline_auto_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
+            # 机器人 user_id < 10 整段视为机器人，分发对应 AI
             if current_player.user_id == 0:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             elif current_player.user_id == 2:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
-            if current_player.user_id in self.game_server.user_id_to_connection:
-                player_conn = self.game_server.user_id_to_connection[current_player.user_id]
-                response = Response(
-                    type="gamestate/sichuan/broadcast_hand_action", success=True,
-                    message="发牌并询问手牌操作",
-                    ask_hand_action_info=Ask_hand_action_info(
-                        remaining_time=current_player.remaining_time,
-                        player_index=self.current_player_index,
-                        remain_tiles=max(0, len(self.tiles_list) - self.dead_wall_count),
-                        action_list=self.action_dict[i],
-                        action_tick=self.server_action_tick,
-                    ),
-                )
-                await player_conn.websocket.send_json(response.dict(exclude_none=True))
-                await self.send_to_realtime_spectators(current_player.player_index, response)
+            elif current_player.user_id < 10:
+                if self.action_dict.get(i, []):
+                    logger.warning(
+                        f"未知保留机器人 user_id={current_player.user_id}，按摸切机器人处理 seat={i}"
+                    )
+                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
+                continue
+            response = Response(
+                type="gamestate/sichuan/broadcast_hand_action", success=True,
+                message="发牌并询问手牌操作",
+                ask_hand_action_info=Ask_hand_action_info(
+                    remaining_time=current_player.remaining_time,
+                    player_index=self.current_player_index,
+                    remain_tiles=max(0, len(self.tiles_list) - self.dead_wall_count),
+                    action_list=self.action_dict[i],
+                    action_tick=self.server_action_tick,
+                ),
+            )
+            is_actor = i == self.current_player_index
+            await _send_ask_response_to_viewer(self, i, response, block=is_actor)
         except Exception as e:
             logger.error(f"四川 ask_hand 广播失败 {current_player.user_id}: {e}")
     if hasattr(self, 'spectator_manager'):
         self.spectator_manager.record_ask_hand(self.current_player_index, self.action_dict.get(self.current_player_index, []))
 
 
-async def broadcast_ask_other_action(self):
+async def broadcast_ask_other_action(self, remaining_time_override: Optional[int] = None, is_tactical_recheck: bool = False):
     cut_tile = self.player_list[self.current_player_index].discard_tiles[-1]
     self.server_action_tick += 1
-    self._ask_broadcast_time = time.time()
+    # 战术打断再问：在派发 AI 前同步 waiting tick，避免机器人因 tick 不一致拒动
+    if is_tactical_recheck:
+        self._waiting_action_tick = self.server_action_tick
+    begin_ask_round(self)
     for i, current_player in enumerate(self.player_list):
         try:
             if "offline" in current_player.tag_list:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(offline_auto_action(self, i, self.action_dict[i], self.game_status))
                 continue
+            # 机器人 user_id < 10 整段视为机器人，分发对应 AI
             if current_player.user_id == 0:
                 if self.action_dict.get(i, []):
                     asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
@@ -228,29 +290,45 @@ async def broadcast_ask_other_action(self):
                 if self.action_dict.get(i, []):
                     asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], self.game_status))
                 continue
-            if current_player.user_id in self.game_server.user_id_to_connection:
-                player_conn = self.game_server.user_id_to_connection[current_player.user_id]
+            elif current_player.user_id < 10:
+                if self.action_dict.get(i, []):
+                    logger.warning(
+                        f"未知保留机器人 user_id={current_player.user_id}，按摸切机器人处理 seat={i}"
+                    )
+                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                continue
+            remaining_time_for_player = (
+                remaining_time_override if remaining_time_override is not None else current_player.remaining_time
+            )
+            if self.action_dict.get(i):
                 response = Response(
                     type="gamestate/sichuan/ask_other_action", success=True, message="询问操作",
                     ask_other_action_info=Ask_other_action_info(
-                        remaining_time=current_player.remaining_time,
+                        remaining_time=remaining_time_for_player,
                         action_list=self.action_dict[i],
+                        cut_tile=cut_tile,
+                        action_tick=self.server_action_tick,
+                        is_tactical_recheck=is_tactical_recheck if is_tactical_recheck else None,
+                    ),
+                )
+                await _send_ask_response_to_viewer(self, i, response)
+            elif not is_tactical_recheck:
+                response = Response(
+                    type="gamestate/sichuan/ask_other_action", success=True, message="询问操作",
+                    ask_other_action_info=Ask_other_action_info(
+                        remaining_time=remaining_time_for_player,
+                        action_list=[],
                         cut_tile=cut_tile,
                         action_tick=self.server_action_tick,
                     ),
                 )
-                await player_conn.websocket.send_json(response.dict(exclude_none=True))
-                await self.send_to_realtime_spectators(current_player.player_index, response)
+                await _send_ask_response_to_viewer(self, i, response)
         except Exception as e:
             logger.error(f"四川 ask_other 广播失败 {current_player.user_id}: {e}")
 
 
 def _reconnect_remaining_time(self, player) -> int:
-    t0 = getattr(self, "_ask_broadcast_time", None)
-    if t0 is None:
-        return player.remaining_time
-    elapsed = max(0, time.time() - t0)
-    return max(0, player.remaining_time - int(elapsed))
+    return reconnect_remaining_time(self, player)
 
 
 async def reconnected_send_pending_ask(self, user_id: int):
@@ -296,35 +374,187 @@ async def broadcast_do_action(self, action_list: List[str], action_player: int,
                               cut_tile: int = None, cut_class: bool = None, cut_tile_index: int = None,
                               deal_tile: int = None, combination_target: str = None,
                               combination_mask: List[int] = None, is_mo_gang: bool = None,
-                              gang_score_changes: Dict[int, int] = None, gang_score_type: str = None):
-    self.server_action_tick += 1
-    if hasattr(self, "_ask_broadcast_time"):
-        delattr(self, "_ask_broadcast_time")
+                              gang_score_changes: Dict[int, int] = None, gang_score_type: str = None,
+                              is_claim: bool = False, silent: bool = False,
+                              cut_from_player: int = None):
+    if not is_claim and not silent and getattr(self, "_tactical_silent_action", False):
+        silent = True
+        self._tactical_silent_action = False
+    if not is_claim:
+        self.server_action_tick += 1
+        if hasattr(self, "_ask_broadcast_time"):
+            delattr(self, "_ask_broadcast_time")
+    elif action_list and cut_tile is not None:
+        from ..public.game_record_manager import track_claim_application
+        track_claim_application(self, action_player, action_list[0], cut_tile)
+
+    interval_active = claim_protection_enabled(self) and getattr(self, "_cp_active", False)
+    is_cut = bool(action_list) and action_list[0] == "cut"
+    is_real_meld = (not is_claim) and bool(action_list) and action_list[0] in REAL_MELD_ACTIONS
+    cut_already_revealed = getattr(self, "_cp_cut_flushed", False)
+
+    # 服务器驱动节奏：实际鸣牌与战术申请（is_claim）都先 flush 暂存 cut，
+    # 受保护观众的鸣牌/申请在循环外内联延迟 gap 后发送（保证 wire 顺序 = 逻辑顺序），
+    # 客户端按到达顺序即时呈现，无需 meld_reveal_delay 与补帧跳延迟启发式。
+    protected_meld_delay = 0.0
+    if interval_active and (is_real_meld or is_claim):
+        protected_meld_delay = await prepare_protected_meld_for_viewers(
+            self,
+            _send_do_action_payload_to_viewer,
+        )
+
+    deferred_protected_sends = []  # [(viewer_index, payload)] 延迟 gap 后发给受保护观众
+
     for i, current_player in enumerate(self.player_list):
         try:
             if "offline" in current_player.tag_list or current_player.user_id == 0:
                 continue
+            if current_player.user_id < 10:
+                continue
+
+            protected = interval_active and is_protected_viewer(self, i)
+
+            if protected and is_real_meld:
+                viewer_silent = silent if cut_already_revealed else False
+            else:
+                viewer_silent = silent
+
+            payload = _build_do_action_payload(
+                self,
+                action_list,
+                action_player,
+                i,
+                cut_tile=cut_tile,
+                cut_class=cut_class,
+                cut_tile_index=cut_tile_index,
+                deal_tile=deal_tile,
+                combination_mask=combination_mask,
+                combination_target=combination_target,
+                is_claim=is_claim,
+                silent=viewer_silent,
+                is_mo_gang=is_mo_gang,
+                gang_score_changes=gang_score_changes,
+                gang_score_type=gang_score_type,
+                cut_from_player=cut_from_player,
+            )
+
+            if protected and is_cut:
+                stash_protected_cut_payload(self, i, payload)
+                continue
+
+            if protected and (is_real_meld or is_claim) and protected_meld_delay > 0:
+                deferred_protected_sends.append((i, payload, is_real_meld))
+                continue
+
             if current_player.user_id in self.game_server.user_id_to_connection:
-                player_conn = self.game_server.user_id_to_connection[current_player.user_id]
-                response = Response(
-                    type="gamestate/sichuan/do_action", success=True, message="返回操作内容",
-                    do_action_info=Do_action_info(
-                        action_list=action_list, action_player=action_player,
-                        action_tick=self.server_action_tick, cut_tile=cut_tile, cut_class=cut_class,
-                        cut_tile_index=cut_tile_index, deal_tile=deal_tile,
-                        combination_mask=combination_mask, combination_target=combination_target,
-                        is_mo_gang=is_mo_gang, gang_score_changes=gang_score_changes,
-                        gang_score_type=gang_score_type,
-                    ),
-                )
-                await player_conn.websocket.send_json(response.dict(exclude_none=True))
-                await self.send_to_realtime_spectators(current_player.player_index, response)
+                await _send_do_action_payload_to_viewer(self, i, payload)
+                if protected and is_real_meld:
+                    mark_post_meld_gap(self, i)
         except Exception as e:
             logger.error(f"四川 do_action 广播失败 {current_player.user_id}: {e}")
+
+    if deferred_protected_sends:
+        from ..public.outbound_pipe import schedule_viewer_send
+
+        for i, payload, defer_real_meld in deferred_protected_sends:
+            def _make_send(vi=i, p=payload):
+                async def _do():
+                    await _deliver_do_action_payload_to_viewer(self, vi, p)
+                return _do
+
+            schedule_viewer_send(
+                self, i, _make_send(), delay_before=protected_meld_delay,
+            )
+            if defer_real_meld:
+                mark_post_meld_gap(self, i)
+
+    if interval_active and is_cut:
+        arm_claim_protection_timer(self, _send_do_action_payload_to_viewer)
+
+    if interval_active and is_real_meld:
+        end_claim_protection_interval(self)
+
+
+def _build_do_action_payload(
+    self,
+    action_list,
+    action_player,
+    viewer_index,
+    *,
+    cut_tile=None,
+    cut_class=None,
+    cut_tile_index=None,
+    deal_tile=None,
+    combination_mask=None,
+    combination_target=None,
+    is_claim=False,
+    silent=False,
+    is_mo_gang=None,
+    gang_score_changes=None,
+    gang_score_type=None,
+    cut_from_player=None,
+):
+    viewer_deal_tile = sanitize_deal_tile_for_viewer(deal_tile, action_player, viewer_index)
+    return {
+        "action_list": action_list,
+        "action_player": action_player,
+        "action_tick": self.server_action_tick,
+        "cut_tile": cut_tile,
+        "cut_class": cut_class,
+        "cut_tile_index": cut_tile_index,
+        "deal_tile": viewer_deal_tile,
+        "combination_mask": combination_mask,
+        "combination_target": combination_target,
+        "is_claim": True if is_claim else None,
+        "silent": True if silent else None,
+        "is_mo_gang": is_mo_gang,
+        "gang_score_changes": gang_score_changes,
+        "gang_score_type": gang_score_type,
+        "cut_from_player": cut_from_player,
+    }
+
+
+async def _deliver_do_action_payload_to_viewer(
+    self, viewer_index: int, payload: dict, msg_type: str = "gamestate/sichuan/do_action"
+):
+    current_player = self.player_list[viewer_index]
+    if "offline" in current_player.tag_list or current_player.user_id == 0:
+        return
+    if current_player.user_id < 10:
+        return
+    if current_player.user_id not in self.game_server.user_id_to_connection:
+        return
+    player_conn = self.game_server.user_id_to_connection[current_player.user_id]
+    response = Response(
+        type=msg_type,
+        success=True,
+        message="返回操作内容",
+        do_action_info=Do_action_info(**payload),
+    )
+    await player_conn.websocket.send_json(response.dict(exclude_none=True))
+    await self.send_to_realtime_spectators(current_player.player_index, response)
+
+
+
+async def _send_do_action_payload_to_viewer(
+    self, viewer_index: int, payload: dict, msg_type: str = "gamestate/sichuan/do_action"
+):
+    from ..public.outbound_pipe import send_to_viewer
+
+    delay_before = take_post_meld_gap_delay(self, viewer_index)
+
+    async def _do():
+        await _deliver_do_action_payload_to_viewer(self, viewer_index, payload, msg_type)
+
+    await send_to_viewer(self, viewer_index, _do, delay_before=delay_before)
 
 
 async def broadcast_result(self, hu_class: str, **kwargs):
     """通用结算广播：透传 Show_result_info 字段（四川扩展见 kwargs）。"""
+    silent = kwargs.pop("silent", False)
+    if not silent and getattr(self, "_tactical_silent_action", False):
+        silent = True
+        self._tactical_silent_action = False
     self.server_action_tick += 1
     for current_player in self.player_list:
         try:
@@ -336,10 +566,25 @@ async def broadcast_result(self, hu_class: str, **kwargs):
                 payload = _viewer_sichuan_hu_payload(payload, current_player.player_index)
                 response = Response(
                     type="gamestate/sichuan/show_result", success=True, message="显示结算结果",
-                    show_result_info=Show_result_info(hu_class=hu_class, action_tick=self.server_action_tick, **payload),
+                    show_result_info=Show_result_info(
+                        hu_class=hu_class,
+                        action_tick=self.server_action_tick,
+                        silent=True if silent else None,
+                        **payload,
+                    ),
                 )
-                await player_conn.websocket.send_json(response.dict(exclude_none=True))
-                await self.send_to_realtime_spectators(current_player.player_index, response)
+                from ..public.outbound_pipe import send_to_viewer
+
+                async def _do(conn=player_conn, resp=response, idx=current_player.player_index):
+                    await conn.websocket.send_json(resp.dict(exclude_none=True))
+                    await self.send_to_realtime_spectators(idx, resp)
+
+                await send_to_viewer(
+                    self,
+                    current_player.player_index,
+                    _do,
+                    delay_before=take_post_meld_gap_delay(self, current_player.player_index),
+                )
         except Exception as e:
             logger.error(f"四川 show_result 广播失败 {current_player.user_id}: {e}")
 

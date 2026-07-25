@@ -25,6 +25,24 @@ public class EndShuheWeiPanel : MonoBehaviour {
     private Coroutine countdownRoutine;
     private string currentState = StateNone;
     private Dictionary<string, int> posToIndex = new Dictionary<string, int>();
+    private bool matchEndMode = false;
+
+    /// <summary>整场末局 match_end：等用户点确定以展示暂存的 game_end。</summary>
+    public bool IsMatchEndPending => matchEndMode && currentState == StateGame && gameObject.activeSelf;
+    public bool IsAwaitingRecordResultConfirm => currentState == StateRecord && gameObject.activeSelf;
+
+    /// <summary>自动播放在结算演出完成、按钮可用后调用。</summary>
+    public bool TryConfirmRecordResult() {
+        if (!IsAwaitingRecordResultConfirm || EndButton == null || !EndButton.interactable) {
+            return false;
+        }
+        OnClickEndButton();
+        return true;
+    }
+
+    public void SetNextStatus(string nextStatus) {
+        matchEndMode = nextStatus == "match_end";
+    }
 
     private void Awake() {
         if (Instance != null && Instance != this) {
@@ -77,6 +95,16 @@ public class EndShuheWeiPanel : MonoBehaviour {
         }
 
         currentState = isRecord ? StateRecord : StateGame;
+        if (isRecord) {
+            matchEndMode = false;
+            if (RoundEndPresentation.Instance != null) {
+                RoundEndPresentation.Instance.gameObject.SetActive(true);
+                var cg = RoundEndPresentation.Instance.GetComponent<CanvasGroup>();
+                if (cg != null) {
+                    cg.alpha = 1f;
+                }
+            }
+        }
         CollectPlayerPanels();
         ResetReadyStatus();
         if (titleText != null) {
@@ -156,6 +184,12 @@ public class EndShuheWeiPanel : MonoBehaviour {
         if (EndButton != null) {
             EndButton.interactable = true;
         }
+        if (matchEndMode) {
+            if (EndButtonText != null) {
+                EndButtonText.text = "确定";
+            }
+            yield break;
+        }
         countdownRoutine = StartCoroutine(CountDownAndHide(Mathf.RoundToInt(RoundEndTiming.HuConfirmCountdownSeconds)));
     }
 
@@ -214,7 +248,7 @@ public class EndShuheWeiPanel : MonoBehaviour {
     }
 
     public void UpdateReadyStatus(Dictionary<int, bool> playerToReady) {
-        if (NormalGameStateManager.Instance == null) {
+        if (matchEndMode) {
             return;
         }
         foreach (var kvp in playerToReady) {
@@ -237,6 +271,11 @@ public class EndShuheWeiPanel : MonoBehaviour {
             return;
         }
         if (currentState == StateGame) {
+            if (matchEndMode) {
+                ClearEndShuheWeiPanel();
+                NormalGameStateManager.Instance.FlushPendingGameEnd();
+                return;
+            }
             GameStateNetworkManager.Instance.SendAction("ready", 0);
         }
     }
@@ -251,6 +290,7 @@ public class EndShuheWeiPanel : MonoBehaviour {
             countdownRoutine = null;
         }
         currentState = StateNone;
+        matchEndMode = false;
         gameObject.SetActive(false);
         if (EndButton != null) {
             EndButton.interactable = false;

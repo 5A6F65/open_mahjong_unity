@@ -29,6 +29,7 @@ from .boardcast import (
 from ..public.logic_common import next_current_num, assign_strict_final_ranks
 from .init_tiles import init_sichuan_tiles
 from ..public.spectator_rules import too_many_ai_for_spectator
+from ..public.vote_manager import vote_checkpoint
 from ..public.game_record_manager import (
     init_game_record, init_game_round, player_action_record_deal,
     player_action_record_round_end, end_game_record, capture_player_entry_order,
@@ -41,6 +42,7 @@ from ..public.round_end_timing import (
     sichuan_chajiao_panel_wait_seconds,
     sichuan_settle_hu_panel_wait_seconds,
     ROUND_END_HAND_REVEAL_SEC,
+    HU_CONFIRM_COUNTDOWN_SEC,
 )
 from ..public.ready_phase import run_sichuan_liuju_final_ready_phase
 from ...game_calculation.game_calculation_service import GameCalculationService
@@ -95,7 +97,7 @@ class SichuanPlayer:
         self.character_used = 0
         self.voice_used = 0
         self.has_draw_slot = False
-        # 四川专用
+        # 川麻专用
         self.dingque_suit = 0   # 1万 2饼 3条 0未定缺
         self.is_hu = False      # 血战：本盘已和退场
         self.hu_order = 0       # 和牌顺序（1=最先）
@@ -110,8 +112,8 @@ class SichuanPlayer:
             self.has_draw_slot = True
 
     def get_gang_tile(self, tiles_list, gamestate):
-        # 四川无死墙，补牌从牌墙尾摸取
-        element = tiles_list.pop(-1)
+        # 川麻无死墙/无岭上：杠后补牌与普通摸牌一致，从牌墙头取
+        element = tiles_list.pop(0)
         self.hand_tiles.append(element)
         self.has_draw_slot = True
 
@@ -150,11 +152,19 @@ class SichuanGameState:
         self.room_rule = room_data["room_rule"]
         self.room_type = room_data["room_type"]
         self.sub_rule = room_data.get("sub_rule", "sichuan/standard")
+        self.match_tier = room_data.get("match_tier")
+        self.event_id = room_data.get("event_id")
 
         self.room_random_seed = room_data.get("random_seed", 0)
         self.open_cuohe = False
         self.show_moqie_hint = room_data.get("show_moqie_hint", False)
         self.tactical_call = room_data.get("tactical_call", False)
+        self.claim_protection = room_data.get("claim_protection", True)
+        self.tactical_pre_grace_delay = room_data.get("tactical_pre_grace_delay", 0.5)
+        self.tactical_grace_seconds = room_data.get("tactical_grace_seconds", 5.0)
+        self.claim_protect_delay = room_data.get("claim_protect_delay", 1.3)
+        self.claim_meld_followup_gap = room_data.get("claim_meld_followup_gap", 0.7)
+        self.claim_meld_post_gap = room_data.get("claim_meld_post_gap", 0.5)
         self.blood_battle = room_data.get("blood_battle", True)
         self.hepai_limit = 1
         self.tourist_limit = room_data.get("tourist_limit", False)
@@ -197,6 +207,9 @@ class SichuanGameState:
         self.dead_wall_count = 0  # 四川无死墙
         self.Debug = False
 
+        from ..public.claim_protection import init_claim_protection_state
+        init_claim_protection_state(self)
+
         self.spectator_enabled = self.allow_spectator_config and not too_many_ai_for_spectator(self.player_list)
         from ..game_classical.spectator_manager import SpectatorManager
         self.spectator_manager = SpectatorManager(self, delay=180.0, enabled=self.spectator_enabled)
@@ -209,11 +222,16 @@ class SichuanGameState:
         await deliver_realtime_spectator_message(self, player_index, response)
 
     async def player_disconnect(self, user_id: int):
+        newly_offline = False
         for p in self.player_list:
             if p.user_id == user_id and "offline" not in p.tag_list:
                 p.tag_list.append("offline")
+                newly_offline = True
                 await broadcast_refresh_player_tag_list(self)
                 break
+        if newly_offline:
+            from ..public.offline import schedule_offline_auto_on_disconnect
+            schedule_offline_auto_on_disconnect(self, user_id)
         non_ai = [p for p in self.player_list if p.user_id >= 10]
         if non_ai and all("offline" in p.tag_list for p in non_ai):
             await self.game_server.gamestate_manager.cleanup_game_state_complete(gamestate_id=self.gamestate_id)
@@ -240,6 +258,8 @@ class SichuanGameState:
             break
 
     async def cleanup_game_state(self):
+        from ..public.outbound_pipe import close_outbound_pipes
+        close_outbound_pipes(self)
         await self.spectator_manager.cleanup()
         if self.game_task and not self.game_task.done():
             self.game_task.cancel()
@@ -304,6 +324,10 @@ class SichuanGameState:
         init_game_record(self)
         self.game_record["game_title"]["sub_rule"] = self.sub_rule
         self.game_record["game_title"]["hepai_limit"] = self.hepai_limit
+        if self.match_tier is not None:
+            self.game_record["game_title"]["match_tier"] = self.match_tier
+        if self.event_id is not None:
+            self.game_record["game_title"]["event_id"] = self.event_id
         self.dealer_index = 0
 
         while self.current_round <= self.max_round * 4:
@@ -324,6 +348,7 @@ class SichuanGameState:
             await self.wait_action()
 
             while self.game_status != "END":
+                await vote_checkpoint(self)
                 match self.game_status:
                     case "deal_card":
                         nxt = self._next_active_index(self.current_player_index)
@@ -381,13 +406,20 @@ class SichuanGameState:
                         self.game_status = "END"
 
             # 流局终局：与血战三家和共用 _settle_liuju（见 ABCD 顺序注释，禁止跳过查叫）
+            self.next_status = (
+                "match_end"
+                if self.current_round >= self.max_round * 4
+                else "round_end_by_ready"
+            )
             if self.ended_by == "liuju":
                 await self._settle_liuju()
                 player_action_record_round_end(self)
-                await self._ready_phase(liuju=True)
+                if self.next_status != "match_end":
+                    await self._ready_phase(liuju=True)
             else:
                 player_action_record_round_end(self)
-                await self._ready_phase(liuju=False)
+                if self.next_status != "match_end":
+                    await self._ready_phase(liuju=False)
 
             # 定庄
             self.dealer_index = self._decide_next_dealer()
@@ -691,6 +723,13 @@ class SichuanGameState:
                 recycle_discard=recycle_discard if not is_zimo else None,
             )
             player_to_score = {p.player_index: p.score for p in self.player_list}
+            if defer_score or ron_i < len(winners) - 1:
+                next_status = "round_continue"
+            elif self.current_round >= self.max_round * 4:
+                next_status = "match_end"
+            else:
+                next_status = "round_end_by_ready"
+            self.next_status = next_status
             await broadcast_result(
                 self, hu_class=hu_class,
                 hepai_player_index=w,
@@ -710,9 +749,13 @@ class SichuanGameState:
                 score_changes=None if defer_score else changes,
                 gang_refund_changes=gang_refund_changes if has_gang_refund and ron_i == 0 else None,
                 round_continues=round_continues,
+                next_status=next_status,
             )
             if defer_score:
                 await asyncio.sleep(SICHUAN_MID_HU_ANIM_SECONDS)
+            elif next_status == "match_end":
+                # 整场末局：不等 8s ready，由客户端 match_end 收尾；仅留倒牌/番种渐显余量
+                await asyncio.sleep(hu_result_ready_wait_seconds(len(fan_list)) - HU_CONFIRM_COUNTDOWN_SEC)
             else:
                 await asyncio.sleep(hu_result_ready_wait_seconds(len(fan_list)))
 
@@ -886,31 +929,49 @@ class SichuanGameState:
         return tiles
 
     # ┌─────────────────────────────────────────────────────────────────────────┐
-    # │ 终局查牌演出顺序（永不跳过查叫；勿再添加 skip/early-return 短路查叫）    │
+    # │ 终局查牌演出顺序                                                        │
     # │                                                                         │
     # │ 核心规则：只要本盘结束，就必须按下述顺序看完所有人的手牌。              │
-    # │ 检查顺序一律按本局 player_index 从 0 递增；先看“和牌玩家”，再看“流局     │
-    # │ （未和）玩家”。每家手牌只展示一次面板。                                  │
+    # │ 先看“和牌玩家”（按和牌先后 hu_order），再看“流局（未和）玩家”。          │
+    # │ 查叫顺序：从末家和牌者的下家起，沿行牌方向（index+1 逆时针）逐家检查，   │
+    # │ 跳过已和玩家。每家手牌只展示一次面板。                                    │
     # │                                                                         │
-    # │ 以四家 A/B/C/D 为例（player_index: A=0,B=1,C=2,D=3；A 和，B 听牌未和，C/D 没叫）： │
+    # │ 以四家 A/B/C/D 为例（player_index: A=0,B=1,C=2,D=3；A 先和、C 后和，     │
+    # │ B 听牌未和，D 没叫）：                                                    │
     # │   ① reveal_hu    — 四家同时亮完整手牌（3D，无计分面板）                  │
-    # │   ② settle_hu×N  — 先看和牌玩家：按 player_index 升序逐笔入账并播面板：   │
-    # │        · A(0) 的和牌结算 → B(1) → C(2)                                   │
-    # │      中途和牌阶段 defer 不计分，仅在此处逐笔结算；非末步 3s，末步见下。   │
-    # │      （注：付分对象由各自 hu_order 决定，与展示顺序无关，分数不受影响）   │
-    # │   ③ chajiao×M  — 再看流局玩家：按 player_index 升序逐家展示手牌+状态：    │
+    # │   ② settle_hu×N  — 按 hu_order 逐笔入账并播面板：A(0) → C(2)             │
+    # │      中途和牌阶段 defer 不计分，仅在此处逐笔结算；非末步 3s。             │
+    # │      若 settle_hu 为末步（三家和跳过查叫）：只等番种/渐显，8s 交给 ④。   │
+    # │   ③ chajiao×M  — 从末家和牌者 C 的下家 D 起逆时针查叫：D(3) → B(1)      │
     # │        · 每家仅 1 次面板，合并该家全部查叫收支（禁止同一家连播多次）       │
-    # │        · B(1) 听牌未和 → C/D 各向其付 B 的理论最大番（在 B 的面板合并展示） │
-    # │        · 已和玩家不参与查叫收分；三家和且无退税时跳过查叫                     │
-    # │        · 三家和但末家有待退税：仅播末家查叫面板（叫况 + 退税）                 │
+    # │        · B 听牌未和 → D 向其付 B 的理论最大番（在 B 的面板合并展示）       │
+    # │        · 已和玩家不参与查叫收分；三家和时整段跳过查叫（含退税）             │
     # │        · 有叫/没叫/花猪 均须展示，即使分数变动为 0 也不可省略             │
-    # │        · 没叫/花猪开杠者本副“刮风下雨”退税并入本家面板：标“退税”、多 0.5s │
-    # │      非末步 3s；仅最后一家显示 8s 可点确定。                              │
-    # │   ④ waiting_ready — 末步 8s 确认后进入下一局                              │
+    # │        · 仅没叫/花猪开杠者查叫时并入本副“刮风下雨”退税：标“退税”、+0.5s  │
+    # │      非末步 3s；末步 sleep=0，8s 可点确定由 ④ 统一等待。                 │
+    # │   ④ waiting_ready — 末步 8s 确认（机器人默认已准备）后进入下一局          │
     # │                                                                         │
     # │ liuju_step 协议：reveal_hu → settle_hu → chajiao（退税并入此步，无独立步）│
     # │ 客户端 RoundEndPresentation.SichuanQueue 与服务端 round_end_timing 对齐。 │
     # └─────────────────────────────────────────────────────────────────────────┘
+
+    def _chajiao_presentation_order(self, non_hu: List) -> List:
+        """未和家查叫展示顺序：末家和牌者下家起，沿 index+1 逆时针，跳过已和。"""
+        if not non_hu:
+            return []
+        n = len(self.player_list)
+        hu_players = [p for p in self.player_list if p.is_hu]
+        if not hu_players:
+            return sorted(non_hu, key=lambda p: p.player_index)
+        last_hu_idx = max(hu_players, key=lambda p: p.hu_order or 0).player_index
+        non_hu_set = {p.player_index for p in non_hu}
+        ordered = []
+        idx = (last_hu_idx + 1) % n
+        for _ in range(n):
+            if idx in non_hu_set:
+                ordered.append(self.player_list[idx])
+            idx = (idx + 1) % n
+        return ordered
 
     async def _settle_liuju(self):
         non_hu = [p for p in self.player_list if not p.is_hu]
@@ -959,13 +1020,8 @@ class SichuanGameState:
         noting_players = [idx for idx, s in status.items() if s == "no_ting"]
 
         hu_players = [p for p in self.player_list if p.is_hu]
-        # 三家和：仅剩一家未和，通常无需查叫；若该家本副有刮风下雨待退税，仍播其查叫面板（展示叫况 + 退税）
-        three_hu_one_left = len(hu_players) >= 3 and len(non_hu) == 1
-        last_non_hu = non_hu[0] if three_hu_one_left else None
-        needs_refund_chajiao = (
-            three_hu_one_left and last_non_hu is not None and bool(last_non_hu.gang_score_records)
-        )
-        skip_chajiao = three_hu_one_left and not needs_refund_chajiao
+        # 三家和：整段跳过查叫（退税仅在查叫且没叫时处理，不在此补播）
+        skip_chajiao = len(hu_players) >= 3
 
         if not self.blood_battle:
             player_action_record_liuju(self)
@@ -988,11 +1044,12 @@ class SichuanGameState:
         )
         await asyncio.sleep(ROUND_END_HAND_REVEAL_SEC)
 
-        # 2) 先看和牌玩家：按 player_index 升序逐笔结算并播面板（血战：终局才入账）
-        #    展示顺序按座位号；付分对象由各自 hu_order 决定（见 _apply_hu_score_changes），与顺序无关。
-        hu_players_sorted = sorted(hu_players, key=lambda p: p.player_index)
+        # 2) 先看和牌玩家：按 hu_order（和牌先后）逐笔结算并播面板（血战：终局才入账）
         if self.blood_battle and self.deferred_hu_settlements:
-            deferred_sorted = sorted(self.deferred_hu_settlements, key=lambda x: x["winner"])
+            deferred_sorted = sorted(
+                self.deferred_hu_settlements,
+                key=lambda x: (x.get("hu_order", 0), x["winner"]),
+            )
             for settle_idx, rec in enumerate(deferred_sorted):
                 w = rec["winner"]
                 p = self.player_list[w]
@@ -1001,7 +1058,7 @@ class SichuanGameState:
                 )
                 player_scores = {p.player_index: p.score for p in self.player_list}
                 is_last_settle = settle_idx == len(deferred_sorted) - 1
-                # settle_hu 为末步：无未和家，或三家和且无需退税查叫
+                # settle_hu 为末步：无未和家，或三家和跳过查叫
                 is_final_panel = is_last_settle and (not non_hu or skip_chajiao)
                 if is_final_panel:
                     self._liuju_final_panel_shown = True
@@ -1011,6 +1068,13 @@ class SichuanGameState:
                         [changes.get(i, 0) for i in range(4)],
                         1 if is_final_panel else 0,
                     )
+                if not is_final_panel:
+                    next_status = "round_continue"
+                elif self.current_round >= self.max_round * 4:
+                    next_status = "match_end"
+                else:
+                    next_status = "round_end_by_ready"
+                self.next_status = next_status
                 await broadcast_result(
                     self,
                     hu_class=rec["hu_class"],
@@ -1029,21 +1093,18 @@ class SichuanGameState:
                     player_to_score=player_scores,
                     liuju_status_final=is_final_panel,
                     round_continues=False,
+                    next_status=next_status,
                 )
-                await asyncio.sleep(
-                    sichuan_settle_hu_panel_wait_seconds(len(rec["fan_list"]), is_final=is_final_panel)
+                # 末步不含 8s 确认（与查叫末步一致，交给 ready / match_end 收尾）
+                panel_wait = sichuan_settle_hu_panel_wait_seconds(
+                    len(rec["fan_list"]), is_final=is_final_panel
                 )
+                await asyncio.sleep(panel_wait)
 
-        # 3) 再看流局玩家：按 player_index 升序逐家展示，每家仅 1 次面板（合并该家全部查叫收支）
-        # 三家和且无退税时整段跳过；有退税时仅播最后一家面板（查叫况 + 退税，不计听牌赔付）。
-        # 禁止 skip/early-return：即使全员同状态或分数变动为 0，也必须播完所有未和家面板。
-        # 没叫/花猪开杠者本副“刮风下雨”退税并入本家面板（不再单独 cha_refund 步）。
-        if needs_refund_chajiao:
-            chajiao_targets = [last_non_hu]
-        elif skip_chajiao:
-            chajiao_targets = []
-        else:
-            chajiao_targets = sorted(non_hu, key=lambda p: p.player_index)
+        # 3) 再看流局玩家：末家和牌者下家起逆时针逐家展示，每家仅 1 次面板（合并该家全部查叫收支）
+        # 三家和时整段跳过；否则即使分数变动为 0 也须播完所有未和家面板。
+        # 仅没叫/花猪开杠者查叫时并入本副“刮风下雨”退税（不再单独 cha_refund 步）。
+        chajiao_targets = [] if skip_chajiao else self._chajiao_presentation_order(non_hu)
 
         for chajiao_idx, n_p in enumerate(chajiao_targets):
             panel_changes: Dict[int, int] = {i: 0 for i in range(4)}
@@ -1054,7 +1115,7 @@ class SichuanGameState:
                 self.player_list[p_idx].score -= SICHUAN_ACTIVE_HUAZHU_PENALTY
                 panel_changes[p_idx] -= SICHUAN_ACTIVE_HUAZHU_PENALTY
 
-            if status.get(p_idx) == "ting" and noting_players and not needs_refund_chajiao:
+            if status.get(p_idx) == "ting" and noting_players:
                 mf = tenpai_max_fan.get(p_idx, 0)
                 mf_names = tenpai_max_fan_names.get(p_idx, [])
                 base = self.calculation_service.Sichuan_base_from_fan(mf, mf_names)
@@ -1089,6 +1150,13 @@ class SichuanGameState:
                     [panel_changes.get(i, 0) for i in range(4)],
                     1 if is_final_panel else 0,
                 )
+            if not is_final_panel:
+                next_status = "round_continue"
+            elif self.current_round >= self.max_round * 4:
+                next_status = "match_end"
+            else:
+                next_status = "round_end_by_ready"
+            self.next_status = next_status
             await broadcast_result(
                 self, hu_class="liuju",
                 liuju_step="chajiao",
@@ -1101,6 +1169,7 @@ class SichuanGameState:
                 liuju_status_final=is_final_panel,
                 liuju_refund=True if panel_has_refund else None,
                 round_continues=False,
+                next_status=next_status,
             )
             if not is_final_panel:
                 await asyncio.sleep(

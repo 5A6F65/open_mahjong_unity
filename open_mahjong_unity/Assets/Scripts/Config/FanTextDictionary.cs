@@ -29,6 +29,57 @@ public static class FanTextDictionary {
         {"连六*1", "1番"}, {"连六*2", "2番"}, {"连六*3", "3番"}, {"连六*4", "4番"},
     };
 
+    private static string FormatChangshaTileName(int tileId) {
+        int suit = tileId / 10;
+        int rank = tileId % 10;
+        string rankName = rank switch {
+            1 => "一",
+            2 => "二",
+            3 => "三",
+            4 => "四",
+            5 => "五",
+            6 => "六",
+            7 => "七",
+            8 => "八",
+            9 => "九",
+            _ => null,
+        };
+        string suitName = suit switch {
+            1 => "万",
+            2 => "筒",
+            3 => "条",
+            _ => null,
+        };
+        return rankName != null && suitName != null ? $"{rankName}{suitName}" : tileId.ToString();
+    }
+
+    private static string FormatChangshaBirdFanName(string fanName) {
+        if (string.IsNullOrEmpty(fanName)) return fanName;
+        string prefix = null;
+        string payload = null;
+        if (fanName.StartsWith("鸟牌:")) {
+            prefix = "鸟牌:";
+            payload = fanName.Substring("鸟牌:".Length);
+        } else if (fanName.StartsWith("中鸟:")) {
+            prefix = "中鸟:";
+            payload = fanName.Substring("中鸟:".Length);
+        }
+        if (prefix == null || string.IsNullOrEmpty(payload) || payload == "无") return fanName;
+
+        string[] parts = payload.Split(',');
+        for (int i = 0; i < parts.Length; i++) {
+            string item = parts[i].Trim();
+            int equalsIndex = item.IndexOf('=');
+            if (equalsIndex >= 0) item = item.Substring(0, equalsIndex);
+            if (int.TryParse(item, out int tileId)) {
+                parts[i] = FormatChangshaTileName(tileId);
+            } else {
+                parts[i] = item;
+            }
+        }
+        return prefix + string.Join(",", parts);
+    }
+
     /// <summary>
     /// 国标麻将（标准）番数英文显示，key 与 <see cref="FanToDisplayGuobiao"/> 一致。
     /// 暂未接入 UI，供后续多语言显示使用。
@@ -110,6 +161,37 @@ public static class FanTextDictionary {
         {"镜同", "精算"}, {"镜同三对", "精算"}, {"镜同二对", "精算"}, {"双龙会", "精算"},
     };
 
+    /// <summary>简单麻将番表，key 使用服务端稳定番种 ID。</summary>
+    public static readonly Dictionary<string, string> FanToDisplayJiandan = new Dictionary<string, string> {
+        {"two_wind_triplets", "1番"}, {"small_three_winds", "3番"}, {"big_three_winds", "8番"}, {"small_four_winds", "20番"}, {"big_four_winds", "20番"},
+        {"red_dragon", "1番"}, {"green_dragon", "1番"}, {"white_dragon", "1番"}, {"two_dragon_triplets", "3番"}, {"small_three_dragons", "8番"}, {"big_three_dragons", "20番"},
+        {"all_simples", "1番"}, {"full_straight", "3番"}, {"mixed_outside_hand", "3番"}, {"mixed_terminals", "8番"}, {"pure_outside_hand", "8番"}, {"pure_terminals", "20番"}, {"thirteen_orphans", "20番"},
+        {"half_flush", "3番"}, {"full_flush", "8番"}, {"all_honors", "20番"}, {"nine_gates", "20番"},
+        {"two_suit_triplets", "1番"}, {"small_three_suit_triplets", "3番"}, {"mixed_triple_chow", "3番"}, {"three_suit_triplets", "8番"},
+        {"closed_hand", "1番"}, {"heavenly_win", "20番"}, {"earthly_win", "20番"},
+        {"pinfu", "1番"}, {"all_triplets", "3番"}, {"seven_pairs", "3番"},
+        {"haitei", "1番"}, {"houtei", "1番"}, {"rinshan", "1番"}, {"chankan", "1番"},
+        {"two_concealed_triplets", "1番"}, {"three_concealed_triplets", "8番"}, {"four_concealed_triplets", "20番"},
+        {"two_consecutive_triplets", "1番"}, {"three_consecutive_triplets", "8番"}, {"four_consecutive_triplets", "20番"},
+        {"pure_double_chow", "1番"}, {"twice_pure_double_chow", "8番"}, {"pure_triple_chow", "8番"}, {"pure_quadruple_chow", "20番"},
+        {"one_kong", "1番"}, {"two_kongs", "3番"}, {"three_kongs", "8番"}, {"four_kongs", "20番"},
+    };
+
+    public static readonly Dictionary<string, string> FanNameToDisplayJiandan = new Dictionary<string, string> {
+        {"two_wind_triplets", "二风刻"}, {"small_three_winds", "小三风"}, {"big_three_winds", "大三风"}, {"small_four_winds", "小四喜"}, {"big_four_winds", "大四喜"},
+        {"red_dragon", "中"}, {"green_dragon", "发"}, {"white_dragon", "白"}, {"two_dragon_triplets", "二元刻"}, {"small_three_dragons", "小三元"}, {"big_three_dragons", "大三元"},
+        {"all_simples", "断幺九"}, {"full_straight", "一气通贯"}, {"mixed_outside_hand", "混全带幺"}, {"mixed_terminals", "混幺九"}, {"pure_outside_hand", "纯全带幺"}, {"pure_terminals", "清幺九"}, {"thirteen_orphans", "十三幺九"},
+        {"half_flush", "混一色"}, {"full_flush", "清一色"}, {"all_honors", "字一色"}, {"nine_gates", "九莲宝灯"},
+        {"two_suit_triplets", "二色同刻"}, {"small_three_suit_triplets", "小三色同刻"}, {"mixed_triple_chow", "三色同顺"}, {"three_suit_triplets", "三色同刻"},
+        {"closed_hand", "门前清"}, {"heavenly_win", "天和"}, {"earthly_win", "地和"},
+        {"pinfu", "平和"}, {"all_triplets", "对对和"}, {"seven_pairs", "七对子"},
+        {"haitei", "海底捞月"}, {"houtei", "河底捞鱼"}, {"rinshan", "杠上开花"}, {"chankan", "抢杠"},
+        {"two_concealed_triplets", "二暗刻"}, {"three_concealed_triplets", "三暗刻"}, {"four_concealed_triplets", "四暗刻"},
+        {"two_consecutive_triplets", "二连刻"}, {"three_consecutive_triplets", "三连刻"}, {"four_consecutive_triplets", "四连刻"},
+        {"pure_double_chow", "一般高"}, {"twice_pure_double_chow", "二般高"}, {"pure_triple_chow", "一色三同顺"}, {"pure_quadruple_chow", "一色四同顺"},
+        {"one_kong", "一杠"}, {"two_kongs", "二杠"}, {"three_kongs", "三杠"}, {"four_kongs", "四杠"},
+    };
+
     /// <summary>
     /// 小林规则番表
     /// </summary>
@@ -129,7 +211,7 @@ public static class FanTextDictionary {
         {"花龙", "8番"}, {"一色三同顺", "24番"}, {"一色三节高", "24番"}, {"清幺九", "64番"}, {"大三元", "64番"}, {"大四喜", "88番"},
         {"清龙", "16番"}, {"一色四同顺", "64番"}, {"一色四节高", "64番"}, {"全双刻", "24番"}, {"字一色", "64番"},
         {"三色双龙会", "24番"}, {"一色双龙会", "64番"},
-        
+
         {"错和", "0番"},
         {"花牌*1", "1番"}, {"花牌*2", "2番"}, {"花牌*3", "3番"}, {"花牌*4", "4番"}, {"花牌*5", "5番"}, {"花牌*6", "6番"}, {"花牌*7", "7番"}, {"花牌*8", "8番"},
         {"四归一*1", "2番"}, {"四归一*2", "4番"}, {"四归一*3", "6番"}, {"四归一*4", "8番"},
@@ -152,17 +234,17 @@ public static class FanTextDictionary {
         {"全带五", "16番"}, {"三同刻", "32番"}, {"三暗刻", "16番"}, {"全不靠", "8番"}, {"大于五", "16番"}, {"小于五", "16番"},
         {"三风刻", "32番"}, {"花龙", "12番"}, {"三色三同顺", "12番"}, {"三色连刻", "16番"},
         {"妙手回春", "8番"}, {"海底捞月", "8番"}, {"杠上开花", "8番"}, {"抢杠和", "8番"},
-        {"碰碰和/对对和", "12番"}, {"混一色", "16番"}, {"三色三步高", "4番"}, {"五门齐", "4番"},
-        {"混全带幺", "12番"}, {"役牌/箭刻", "4番"}, {"役牌/门风刻", "4番"}, {"门前清", "4番"},
-        {"平和", "2番"}, {"四归一", "4番"}, {"两同刻/双同刻", "4番"}, {"暗刻×2/双暗刻", "4番"},
+        {"碰碰和", "12番"}, {"混一色", "16番"}, {"三色三步高", "4番"}, {"五门齐", "4番"},
+        {"混全带幺", "12番"}, {"役·箭刻", "4番"}, {"役·门风刻", "4番"}, {"门前清", "4番"},
+        {"平和", "2番"}, {"四归一", "4番"}, {"双同刻", "4番"}, {"双暗刻", "4番"},
         {"断幺", "2番"}, {"一般高", "4番"}, {"喜相逢", "2番"}, {"缺一门", "2番"},
-        {"独听·边张", "2番"}, {"独听·嵌张", "2番"}, {"独听·单钓", "2番"}, {"自摸", "2番"},
+        {"自摸", "2番"},
         {"暗刻", "2番"}, {"杠", "4番"}, {"清·全带幺", "24番"}, {"全单", "12番"}, {"全双", "24番"},
         {"四连刻", "120番"}, {"镜同·双喜同刻", "16番"}, {"镜同·两般高", "32番"}, {"镜同·双龙会", "32番"},
         {"错和", "0番"},
         {"花牌*1", "1番"}, {"花牌*2", "2番"}, {"花牌*3", "3番"}, {"花牌*4", "4番"}, {"花牌*5", "5番"}, {"花牌*6", "6番"}, {"花牌*7", "7番"}, {"花牌*8", "8番"},
         {"四归一*1", "4番"}, {"四归一*2", "8番"}, {"四归一*3", "12番"}, {"四归一*4", "16番"},
-        {"两同刻/双同刻*1", "4番"}, {"两同刻/双同刻*2", "8番"}, {"两同刻/双同刻*3", "12番"}, {"两同刻/双同刻*4", "16番"},
+        {"双同刻*1", "4番"}, {"双同刻*2", "8番"}, {"双同刻*3", "12番"}, {"双同刻*4", "16番"},
         {"一般高*1", "4番"}, {"一般高*2", "8番"}, {"一般高*3", "12番"}, {"一般高*4", "16番"},
         {"喜相逢*1", "2番"}, {"喜相逢*2", "4番"}, {"喜相逢*3", "6番"}, {"喜相逢*4", "8番"},
         {"杠*1", "4番"}, {"杠*2", "8番"},
@@ -308,7 +390,6 @@ public static class FanTextDictionary {
         {"国士无双", "满贯"},
     };
 
-
     /// <summary>
     /// 四川麻将（血战到底）番数说明：番数为累加制，3番封顶（基本分=2^min(总番,3)）。
     /// </summary>
@@ -324,6 +405,22 @@ public static class FanTextDictionary {
         {"杠上炮", "1番"},
         {"抢杠", "1番"},
         {"海底", "1番"},
+    };
+
+    public static readonly Dictionary<string, string> FanToDisplayChangsha = new Dictionary<string, string> {
+        {"小胡", "基础"},
+        {"碰碰胡", "大胡"},
+        {"将将胡", "大胡"},
+        {"清一色", "大胡"},
+        {"全求人", "大胡"},
+        {"七小对", "大胡"},
+        {"豪华七小对", "大胡"},
+        {"天胡", "大胡"},
+        {"地胡", "大胡"},
+        {"海底", "大胡"},
+        {"杠上开花", "大胡"},
+        {"杠上炮", "大胡"},
+        {"抢杠胡", "大胡"},
     };
 
     /// <summary>
@@ -358,6 +455,12 @@ public static class FanTextDictionary {
         if (rule != null && rule.StartsWith("riichi")) {
             return GetRiichiYakuDisplayName(fanName);
         }
+        if (rule == "jiandan/standard" && FanNameToDisplayJiandan.TryGetValue(fanName, out string jiandanName)) {
+            return jiandanName;
+        }
+        if (rule == "changsha/classic_double_bird") {
+            return FormatChangshaBirdFanName(fanName);
+        }
         return fanName;
     }
 
@@ -380,6 +483,17 @@ public static class FanTextDictionary {
         else if (rule == "guobiao/lanshi") map = FanToDisplayLanshi;
         else if (rule == "classical/standard") map = FanToDisplayClassical;
         else if (rule == "sichuan/standard") map = FanToDisplaySichuan;
+        else if (rule == "jiandan/standard") map = FanToDisplayJiandan;
+        else if (rule == "changsha/classic_double_bird") {
+            if (!string.IsNullOrEmpty(fanName)
+                && (fanName.StartsWith("鸟牌:")
+                    || fanName.StartsWith("中鸟:")
+                    || fanName.StartsWith("中鸟x")
+                    || fanName.StartsWith("扎鸟倍数:"))) {
+                return "结算";
+            }
+            map = FanToDisplayChangsha;
+        }
         else if (rule != null && rule.StartsWith("riichi")) {
             if (FanToDisplayRiichi.TryGetValue(fanName, out string riichiDisplay)) return riichiDisplay;
             if (FanToDisplayRiichiInactive.TryGetValue(fanName, out riichiDisplay)) return riichiDisplay;
@@ -390,7 +504,7 @@ public static class FanTextDictionary {
     }
 
     /// <summary>
-    /// 国标：任一单项番数 ≥48；日麻：含役满（含双倍役满）时，和牌面板出现应播放 Gong_hu 音效。
+    /// 国标：任一单项番数 &gt;24（即 32 番及以上）；日麻：含役满（含双倍役满）时，和牌面板出现应播放 Gong_hu 音效。
     /// </summary>
     public static bool ShouldPlayGongHuSound(string rule, string[] huFan) {
         if (huFan == null || huFan.Length == 0 || string.IsNullOrEmpty(rule)) {
@@ -409,7 +523,7 @@ public static class FanTextDictionary {
                 if (display.Contains("役满")) {
                     return true;
                 }
-            } else if (TryParseSingleFanValue(display, out int fan) && fan >= 48) {
+            } else if (TryParseSingleFanValue(display, out int fan) && fan > 24) {
                 return true;
             }
         }

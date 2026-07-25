@@ -24,6 +24,7 @@ public class CreateGBRoomRequest { // 创建国标房间请求
     public bool tourist_limit; // 游客限制
     public bool allow_spectator; // 允许观战
     public bool tactical_call; // 战术鸣牌（国标/青雀）
+    public string event_id; // 赛事房间：有则 room_type=events
 }
 
 public class CreateRiichiRoomRequest { // 创建立直麻将房间请求
@@ -46,6 +47,7 @@ public class CreateRiichiRoomRequest { // 创建立直麻将房间请求
     public string hepai_way; // 和牌方式：head_bump / multi_ron / three_ron_abort
     public bool tourist_limit;
     public bool allow_spectator;
+    public string event_id; // 赛事房间：有则 room_type=events
 }
 
 public class CreateSichuanRoomRequest { // 创建四川麻将（血战到底）房间请求
@@ -63,11 +65,44 @@ public class CreateSichuanRoomRequest { // 创建四川麻将（血战到底）�
     public bool allow_spectator;
     public bool tactical_call; // 战术鸣牌
     public bool blood_battle; // 血战到底：开=和牌后续打至三家和或流局；关=一家和牌即结束本盘
+    public string event_id; // 赛事房间：有则 room_type=events
+}
+
+public class CreateChangshaRoomRequest { // 创建长沙麻将房间请求
+    public string type;
+    public string rule;
+    public string sub_rule;
+    public string roomname;
+    public int gameround;
+    public int roundTimerValue;
+    public int stepTimerValue;
+    public bool tips;
+    public string password;
+    public string random_seed;
+    public bool tourist_limit;
+    public bool allow_spectator;
+    public bool tactical_call;
+    public int open_kong_replacement_count;
+    public bool initial_hu_si_xi;
+    public bool initial_hu_ban_ban_hu;
+    public bool initial_hu_que_yi_se;
+    public bool initial_hu_liu_liu_shun;
+    public bool initial_hu_san_tong;
+    public int bird_count;
+    public bool dealer_bird;
+    public bool base_score_no_dealer;
+    public int small_hu_score;
+    public int big_hu_score;
+    public string event_id; // 赛事房间：有则 room_type=events
 }
 
 public class GetRoomListRequest { // 获取房间列表请求
     public string type;
     public bool show_tip; // True=手动刷新显示tips，False=静默刷新
+}
+
+public class SyncMyRoomRequest { // 同步当前玩家房间状态（重连后拉取权威房间信息）
+    public string type;
 }
 
 public class JoinRoomRequest { // 加入房间请求
@@ -102,6 +137,7 @@ public class SendActionRequest { // 发送国标游戏操作请求
     public int? TileId; // 切牌
     public string gamestate_id; // 游戏状态ID
     public int? chiComboIndex; // 立直麻将赤宝牌吃牌候选索引，默认 0 表示优先非赤 5
+    public int? action_tick; // 本次操作所回应的询问帧；服务端用于丢弃战术鸣牌前的过期提交
 }
 
 public class SetRyuukyokuTenpaiRequest {
@@ -114,6 +150,13 @@ public class GetRecordListRequest { // 获取游戏记录请求
     public string type;
     public int limit = 20;
     public int offset = 0;
+    public bool favorites_only;
+}
+
+public class UpdateRecordFavoriteRequest {
+    public string type;
+    public string game_id;
+    public bool is_favorite;
 }
 
 public class GetRankRecordListRequest { // 获取全服最近天梯对局记录请求
@@ -146,6 +189,12 @@ public class GetQingqueStatsRequest { // 获取青雀统计数据请求
     public string type;
     public string userid;
     public bool need_player_info; // 是否需要玩家信息（第一次加载时需要）
+}
+
+public class GetJiandanStatsRequest { // 获取简单麻将统计数据请求
+    public string type;
+    public string userid;
+    public bool need_player_info;
 }
 
 public class SendReleaseVersionRequest { // 发送发布版本号请求
@@ -202,4 +251,21 @@ public class SendStickerRequest {
     public string type;
     public string gamestate_id;
     public string sticker;
+}
+
+public class VoteStartRequest { // 发起投票暂停/结束对局
+    public string type;
+    public string gamestate_id;
+    public string vote_type; // "pause" / "end"
+}
+
+public class VoteResponseRequest { // 投票同意/拒绝
+    public string type;
+    public string gamestate_id;
+    public string vote; // "agree" / "refuse"
+}
+
+public class VoteResumeRequest { // 解除暂停
+    public string type;
+    public string gamestate_id;
 }

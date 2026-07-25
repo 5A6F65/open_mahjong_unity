@@ -1,7 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
-using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -23,6 +22,8 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
     public bool currentGetTile;   // 摸牌标记：仅用于服务端摸切/手切判定（拖入手牌排序后仍需保留）
     public bool isDrawSlotPinned;   // 固定标记：是否固定显示在独立摸牌区（手动理牌拖入主列后清除，不影响 currentGetTile）
     public int handSortIndex;   // 手牌排序位置，数值越大越靠右
+    /// <summary>本地已发出切牌请求的实例标记；回包删牌优先认它，避免 sibling 收拢后误删。</summary>
+    public bool pendingLocalCut;
 
     private bool isHovering = false; // 是否正在悬停
     private bool isSelectable = true;
@@ -108,10 +109,8 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
             return;
         }
         isHovering = false;
-        TipsContainer.Instance.HideTips();
-        if (Card3DHoverManager.Instance != null) {
-            Card3DHoverManager.Instance.OnCardExit();
-        }
+        TipsContainer.Instance.EndCutPreviewTips();
+        Card3DHoverManager.Instance.OnCardExit();
     }
 
     private void OnEnable()
@@ -168,32 +167,47 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
         if (!skipSameCardCheck && !pressCard.IsSameCardReleasePoint(releaseScreenPos)) {
             return false;
         }
-        bool canCut = NormalGameStateManager.Instance != null && (
-            NormalGameStateManager.Instance.allowActionList.Contains("cut")
-            || (RiichiCutSelectionController.Instance != null && RiichiCutSelectionController.Instance.IsActive));
-        if (!canCut) {
-            Debug.LogWarning($"[HandInput] 左键出牌被拦截(无cut权限) | tileId={pressCard.tileId}");
-            pointerDownCard = null;
-            return false;
-        }
+        bool canCut = NormalGameStateManager.Instance.allowActionList.Contains("cut")
+            || RiichiCutSelectionController.Instance.IsActive;
 
         if (ShouldUseHandCutConfirm()) {
             HandCardSelectionController selection = HandCardSelectionController.Instance;
-            if (selection == null || !selection.IsArmed(pressCard)) {
+            bool armed = selection != null && selection.IsArmed(pressCard);
+            if (!armed) {
+                // 自由立起：两次点击仅用于避免手机端误触，单击只是立起并显示该牌出牌提示，
+                // 不论是否轮到自己、是否有 cut 权限都允许立起。
                 selection?.Arm(pressCard);
                 // 消费本帧：同一次松手会经由 Relay 与全局 Update 两条路径进入，
                 // 否则第二条路径会把刚立起的牌当成"二次确认"直接打出。
                 lastHandledPointerFrame = Time.frameCount;
                 return false;
             }
-            selection.CommitDiscard(pressCard);
-            if (GameCanvas.Instance != null) {
-                GameCanvas.Instance.AnimateHandLayoutForDiscard(pressCard);
+            // 已立起，二次点击才真正出牌；无 cut 权限（非自己回合等）时取消立起。
+            if (!canCut) {
+                Debug.Log($"[HandInput] 二次点击但无cut权限，取消立起 | tileId={pressCard.tileId}");
+                selection.DisarmAll();
+                lastHandledPointerFrame = Time.frameCount;
+                pointerDownCard = null;
+                return false;
             }
-        } else {
-            HandCardSelectionController.Instance?.DisarmAll();
+            selection.CommitDiscard(pressCard);
+            lastHandledPointerFrame = Time.frameCount;
+            HandCardDragController.MarkTileClickHandledThisFrame();
+            Debug.Log($"[HandInput] 左键出牌提交(确认) | tileId={pressCard.tileId} | moqie={pressCard.currentGetTile}");
+            // 必须先出牌再做收拢预览：AnimateHandLayoutForDiscard 会即时重排兄弟节点索引，
+            // 若在 TriggerClick 之前调用，OnTileClick 读取到的 GetSiblingIndex 会被打乱，导致服务端切牌位置错乱。
+            pressCard.TriggerClick();
+            GameCanvas.Instance.AnimateHandLayoutForDiscard(pressCard);
+            return true;
         }
 
+        // 非确认模式：单击直接出牌，必须有 cut 权限。
+        if (!canCut) {
+            Debug.LogWarning($"[HandInput] 左键出牌被拦截(无cut权限) | tileId={pressCard.tileId}");
+            pointerDownCard = null;
+            return false;
+        }
+        HandCardSelectionController.Instance.DisarmAll();
         lastHandledPointerFrame = Time.frameCount;
         HandCardDragController.MarkTileClickHandledThisFrame();
         Debug.Log($"[HandInput] 左键出牌提交 | tileId={pressCard.tileId} | moqie={pressCard.currentGetTile}");
@@ -202,13 +216,13 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
     }
 
     private static bool ShouldUseHandCutConfirm() {
-        if (ConfigManager.Instance == null || !ConfigManager.Instance.IsHandCutConfirmEnabled) {
+        if (!ConfigManager.Instance.IsHandCutConfirmEnabled) {
             return false;
         }
-        if (RiichiCutSelectionController.Instance != null && RiichiCutSelectionController.Instance.IsActive) {
+        if (RiichiCutSelectionController.Instance.IsActive) {
             return false;
         }
-        if (GameCanvas.Instance != null && GameCanvas.Instance.IsHandRecordPlayback()) {
+        if (GameCanvas.Instance.IsHandRecordPlayback()) {
             return false;
         }
         return true;
@@ -278,7 +292,7 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
         // 不需要添加扩展名
         string path = $"image/CardFaceImage_xuefun/{faceResourceId}";
         Sprite sprite = Resources.Load<Sprite>(path);
-        
+
         if (sprite != null) {
             tileImage.sprite = sprite;
         } else {
@@ -295,7 +309,8 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
             return;
         }
         // 立直选牌模式优先：仅向服务器发送 riichi_cut 请求；候选过滤已由 SetSelectable 完成。
-        if (RiichiCutSelectionController.Instance != null && RiichiCutSelectionController.Instance.IsActive) {
+        if (RiichiCutSelectionController.Instance.IsActive) {
+            GameCanvas.Instance.MarkPendingLocalCut(this);
             int cutIndex = transform.GetSiblingIndex();
             GameStateNetworkManager.Instance.SendRiichiCut(currentGetTile, tileId, cutIndex);
             RiichiCutSelectionController.Instance.ExitRiichiCutMode();
@@ -303,6 +318,7 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
         }
         // 如果切牌在允许操作列表中
         if (NormalGameStateManager.Instance.allowActionList.Contains("cut")){
+            GameCanvas.Instance.MarkPendingLocalCut(this);
             int cutIndex = transform.GetSiblingIndex();// 获取切牌是父物体的第几个子物体
             GameStateNetworkManager.Instance.SendChineseGameTile(currentGetTile,tileId,cutIndex); // 发送切牌请求
         } else {
@@ -312,14 +328,25 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
 
     /// <summary>
     /// 两次点击确认：选中立起/取消时由 HandCardSelectionController 回调。
-    /// 立起时无论指针悬停与否都显示该牌的切牌听牌提示；取消且未悬停时收起提示。
+    /// 立起时无论指针悬停与否都显示该牌的切牌听牌提示与同色 3D 高亮；
+    /// 取消立起（点空白处等）时一并收起提示并恢复 3D 牌面。
     /// </summary>
     public void OnArmedStateChanged(bool armed) {
         if (armed) {
             CheckCutTileTips(ignoreHoverGate: true);
+            if (ShouldUseHandCutConfirm() && tileId != -1) {
+                Card3DHoverManager.Instance.OnCardHover(tileId);
+            }
+            return;
         }
-        else if (!isHovering) {
-            TipsContainer.Instance.HideTips();
+        if (ShouldUseHandCutConfirm()) {
+            isHovering = false;
+            TipsContainer.Instance.EndCutPreviewTips();
+            Card3DHoverManager.Instance.OnCardExit();
+            return;
+        }
+        if (!isHovering) {
+            TipsContainer.Instance.EndCutPreviewTips();
         }
     }
 
@@ -359,7 +386,6 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
         OnTileClick();
     }
 
-    
     /// <summary>
     /// 鼠标进入时检测切牌后的听牌，并高亮所有相同tileId的3D卡牌
     /// </summary>
@@ -369,30 +395,35 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
             return;
         }
         isHovering = true;
-        // 异步检测切牌后的听牌
-        CheckCutTileTips();
+        // 两次点击确认模式下提示由"单击立起"驱动，悬停不再显示提示（也不在摸牌后因悬停而固定显示）。
+        if (!ShouldUseHandCutConfirm())
+        {
+            // 异步检测切牌后的听牌
+            CheckCutTileTips();
+        }
         // 高亮所有相同tileId的3D卡牌
-        if (tileId != -1 && Card3DHoverManager.Instance != null)
+        if (tileId != -1)
         {
             Card3DHoverManager.Instance.OnCardHover(tileId);
         }
     }
-    
+
     /// <summary>
     /// 鼠标离开时隐藏提示，并恢复所有3D卡牌
     /// </summary>
     public void OnPointerExit(PointerEventData eventData)
     {
         isHovering = false;
-        // 直接隐藏提示容器（内部会先清空内容）
-        TipsContainer.Instance.HideTips();
-        // 恢复所有3D卡牌
-        if (Card3DHoverManager.Instance != null)
+        // 两次点击确认模式下提示完全由"立起态"驱动：立起后固定显示该牌的提示，
+        // 鼠标移到/移出其它手牌都不改变提示（否则移开任意牌都会把立起牌的固定提示清掉）。
+        if (!ShouldUseHandCutConfirm())
         {
-            Card3DHoverManager.Instance.OnCardExit();
+            TipsContainer.Instance.EndCutPreviewTips();
         }
+        // 恢复所有3D卡牌
+        Card3DHoverManager.Instance.OnCardExit();
     }
-    
+
     /// <summary>
     /// 检测切牌后的听牌提示。ignoreHoverGate=true 用于两次点击确认的立起提示（不要求指针悬停）。
     /// </summary>
@@ -402,16 +433,16 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
         if (!NormalGameStateManager.Instance.tips){
             return;
         }
-        
+
         // 检查是否有切牌权限
         if (!NormalGameStateManager.Instance.allowActionList.Contains("cut")){
             return;
         }
-        
+
         // 临时移除当前牌，进行听牌检测
         List<int> tempHandTiles = new List<int>(NormalGameStateManager.Instance.selfHandTiles);
         tempHandTiles.Remove(tileId);
-        
+
         // 执行听牌检测
         HashSet<int> waitingTiles = new HashSet<int>();
         try
@@ -455,6 +486,18 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
                     waitingTiles.RemoveWhere(w => (w / 10) == dingque);
                 }
             }
+            else if (NormalGameStateManager.Instance.roomRule == "jiandan"){
+                waitingTiles = JiandanExternal.TingpaiCheck(
+                    tempHandTiles,
+                    NormalGameStateManager.Instance.player_to_info["self"].combination_tiles ?? new List<string>()
+                );
+            }
+            else if (NormalGameStateManager.Instance.roomRule == "changsha"){
+                waitingTiles = ChangshaExternal.TingpaiCheck(
+                    tempHandTiles,
+                    NormalGameStateManager.Instance.player_to_info["self"].combination_tiles ?? new List<string>()
+                );
+            }
             else
             {
                 Debug.LogWarning($"未知的规则类型: {NormalGameStateManager.Instance.roomRule}");
@@ -466,13 +509,13 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
             Debug.LogError($"检测切牌提示时出错: {e.Message}");
             waitingTiles = new HashSet<int>();
         }
-        
+
         // 检查是否还在悬停状态（避免异步返回时已经离开）；立起提示不受悬停限制
         if (!isHovering && !ignoreHoverGate)
         {
             return;
         }
-        
+
         // 如果听牌列表不为空，则显示提示
         if (waitingTiles.Count > 0)
         {
@@ -485,8 +528,7 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
         else
         {
             Debug.Log($"切牌后无听牌");
-            TipsContainer.Instance.hasTips = false;
-            TipsContainer.Instance.HideTips();
+            TipsContainer.Instance.EndCutPreviewTips();
         }
     }
 
@@ -523,11 +565,11 @@ public class TileCard : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler
 
     private void OnDestroy()
     {
-        HandCardSelectionController.Instance?.OnCardDestroyed(this);
+        HandCardSelectionController.Instance.OnCardDestroyed(this);
         // 隐藏提示（参照tips的设计模式）
         TipsContainer.Instance.HideTips();
         // 清除3D卡牌高亮效果（如果正在悬停）
-        if (isHovering && Card3DHoverManager.Instance != null)
+        if (isHovering)
         {
             Card3DHoverManager.Instance.OnCardExit();
         }
@@ -545,7 +587,14 @@ public class TileCardDragRelay : MonoBehaviour, IPointerDownHandler, IDragHandle
     }
 
     public void OnPointerDown(PointerEventData eventData) {
-        if (owner == null || eventData.button != PointerEventData.InputButton.Left) {
+        if (owner == null) {
+            return;
+        }
+        if (eventData.button == PointerEventData.InputButton.Right) {
+            GameSceneMouseInputController.Instance.NotifyHandCardRightPointerDown();
+            return;
+        }
+        if (eventData.button != PointerEventData.InputButton.Left) {
             return;
         }
         TileCard.NotifyPointerDown(owner);
@@ -576,7 +625,7 @@ public class TileCardDragRelay : MonoBehaviour, IPointerDownHandler, IDragHandle
         if (eventData.button != PointerEventData.InputButton.Right) {
             return;
         }
-        GameSceneMouseInputController.Instance?.HandleExternalPointerClick(eventData);
+        GameSceneMouseInputController.Instance.HandleExternalPointerClick(eventData);
     }
 }
 
@@ -591,7 +640,14 @@ public class TileCardSlotClickRelay : MonoBehaviour, IPointerDownHandler, IPoint
     }
 
     public void OnPointerDown(PointerEventData eventData) {
-        if (owner != null && eventData.button == PointerEventData.InputButton.Left) {
+        if (owner == null) {
+            return;
+        }
+        if (eventData.button == PointerEventData.InputButton.Right) {
+            GameSceneMouseInputController.Instance.NotifyHandCardRightPointerDown();
+            return;
+        }
+        if (eventData.button == PointerEventData.InputButton.Left) {
             TileCard.NotifyPointerDown(owner);
         }
     }
@@ -611,6 +667,6 @@ public class TileCardSlotClickRelay : MonoBehaviour, IPointerDownHandler, IPoint
         if (eventData.button != PointerEventData.InputButton.Right) {
             return;
         }
-        GameSceneMouseInputController.Instance?.HandleExternalPointerClick(eventData);
+        GameSceneMouseInputController.Instance.HandleExternalPointerClick(eventData);
     }
 }

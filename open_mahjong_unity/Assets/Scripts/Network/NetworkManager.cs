@@ -9,10 +9,6 @@ using System.Collections;
 using System.Net;
 using System.Net.Sockets;
 
-
-
-
-
 [Serializable]
 public class GameEvent : UnityEvent<bool, string> {} // 标准通知类
 
@@ -20,7 +16,7 @@ public class NetworkManager : MonoBehaviour {
 
     public static NetworkManager Instance { get; private set; }
     private WebSocket websocket; // 定义websocket
-    
+
     /// <summary>
     /// 获取 websocket 连接（供其他管理器使用）
     /// </summary>
@@ -30,6 +26,9 @@ public class NetworkManager : MonoBehaviour {
     private string playerId; // 定义玩家ID
     private bool isConnecting = false; // 定义连接状态
     private Queue<byte[]> messageQueue = new Queue<byte[]>(); // 定义消息队列
+    private readonly Queue<byte[]> priorityMessageQueue = new Queue<byte[]>(); // 需立即处理的消息（如 match/match_found）
+    private const string MatchFoundTypeJson = "\"type\":\"match/match_found\"";
+
     public GameEvent ErrorResponse = new GameEvent(); // 定义错误响应事件
     public GameEvent CreateRoomResponse = new GameEvent(); // 定义创建房间响应事件
 
@@ -41,8 +40,14 @@ public class NetworkManager : MonoBehaviour {
     private long _lastPingTs;
     private float _lastPongElapsed; // 距离上次收到 pong 的时间，用于检测超时
     private int _latencyMs = -1; // -1 表示尚未取得测量
+
+    // AutoReconnect 探活
+    public bool ProbePongReceived { get; private set; }
+
     /// <summary>最近一次 ping/pong 测得的延迟（毫秒）。-1 表示未测得，>=0 为有效值。</summary>
     public int LatencyMs => _latencyMs;
+    /// <summary>当前 WebSocket 是否处于已连接状态。</summary>
+    public bool IsWebSocketOpen => websocket != null && websocket.State == WebSocketState.Open;
     /// <summary>延迟变更事件。每次收到 pong 或 ping 超时时触发，参数为最新延迟（毫秒）。</summary>
     public event Action<int> OnLatencyChanged;
 
@@ -52,7 +57,6 @@ public class NetworkManager : MonoBehaviour {
     private enum DisconnectDialogState { Start, Connected, Disconnected, Shown, NoMatch }
     private DisconnectDialogState _disconnectDialogState = DisconnectDialogState.Start;
     // 解析后的 WebSocket URL（用于存储 DNS 解析结果）
-
 
     // 1.Awake方法用于实例化单例进入DontDestroyOnLoad，并配置WebSocket基础的方法
     private void Awake(){
@@ -67,38 +71,74 @@ public class NetworkManager : MonoBehaviour {
         BindWebSocketEvents(websocket);
     }
 
-    private void BindWebSocketEvents(WebSocket ws) {
-        ws.OnMessage += (bytes) => {
-            lock(messageQueue) {
+    private static bool IsMatchFoundMessage(byte[] bytes) {
+        if (bytes == null || bytes.Length == 0) return false;
+        return System.Text.Encoding.UTF8.GetString(bytes).Contains(MatchFoundTypeJson);
+    }
+
+    private void EnqueueIncomingMessage(byte[] bytes) {
+        lock (messageQueue) {
+            if (IsMatchFoundMessage(bytes)) {
+                priorityMessageQueue.Enqueue(bytes);
+            } else {
                 messageQueue.Enqueue(bytes);
             }
-        };
+        }
+    }
+
+    private bool TryDequeueNextMessage(out byte[] message) {
+        lock (messageQueue) {
+            if (priorityMessageQueue.Count > 0) {
+                message = priorityMessageQueue.Dequeue();
+                return true;
+            }
+            if (messageQueue.Count > 0) {
+                message = messageQueue.Dequeue();
+                return true;
+            }
+        }
+        message = null;
+        return false;
+    }
+
+    private void BindWebSocketEvents(WebSocket ws) {
+        ws.OnMessage += EnqueueIncomingMessage;
 
         ws.OnOpen += () => {
+            if (ws != websocket) return;
             Debug.Log("WebSocket连接成功");
             isConnecting = false;
             OnConnectionEstablished();
             ExecuteOnMainThread(() => {
-                LoginPanel.Instance?.ConnectOkText();
+                if (IsOnLoginPage()) {
+                    LoginPanel.Instance?.ConnectOkText();
+                }
             });
             SendReleaseVersion();
         };
 
         ws.OnError += (errorMsg) => {
+            if (ws != websocket) return;
             Debug.LogError($"WebSocket连接失败: {errorMsg}");
             isConnecting = false;
-            _disconnectDialogState = DisconnectDialogState.Start;
             ExecuteOnMainThread(() => {
-                LoginPanel.Instance?.ConnectErrorText(errorMsg);
+                if (IsOnLoginPage()) {
+                    LoginPanel.Instance?.ConnectErrorText(errorMsg);
+                }
+                HandleConnectionLostUi();
             });
         };
 
         ws.OnClose += (code) => {
+            if (ws != websocket) return;
             Debug.Log($"WebSocket已关闭: {code}");
             isConnecting = false;
             ExecuteOnMainThread(() => {
-                LoginPanel.Instance?.ConnectErrorText("连接已关闭");
-                MarkDisconnected();
+                if (AutoReconnect.TryHandleOnClose()) return;
+                if (IsOnLoginPage()) {
+                    LoginPanel.Instance?.ConnectErrorText("连接已关闭");
+                }
+                HandleConnectionLostUi();
             });
         };
     }
@@ -109,6 +149,31 @@ public class NetworkManager : MonoBehaviour {
 
     private void MarkDisconnected() {
         if (_disconnectDialogState != DisconnectDialogState.Connected) return;
+        _disconnectDialogState = DisconnectDialogState.Disconnected;
+        TryShowDisconnectDialog();
+    }
+
+    private bool IsOnLoginPage() {
+        var wm = WindowsManager.Instance;
+        return wm != null && wm.GetCurrentWindow() == "login";
+    }
+
+    /// <summary>
+    /// 已连上后再断开走 MarkDisconnected；登录页首次连接失败则弹断线重连面板（AutoReconnect 活跃时不介入）。
+    /// </summary>
+    private void HandleConnectionLostUi() {
+        if (AutoReconnect.IsActive) return;
+        if (_disconnectDialogState == DisconnectDialogState.Connected) {
+            MarkDisconnected();
+            return;
+        }
+        if (!IsOnLoginPage()) return;
+        if (_disconnectDialogState == DisconnectDialogState.Shown
+            || _disconnectDialogState == DisconnectDialogState.NoMatch) return;
+        ForceShowDisconnectDialog();
+    }
+
+    public void ForceShowDisconnectDialog() {
         _disconnectDialogState = DisconnectDialogState.Disconnected;
         TryShowDisconnectDialog();
     }
@@ -124,8 +189,32 @@ public class NetworkManager : MonoBehaviour {
     }
 
     private void OnApplicationPause(bool pause) {
-        if (pause) return;
-        CheckDisconnectOnForeground();
+        if (pause) {
+            AutoReconnect.OnEnterBackground();
+            return;
+        }
+        // 先派发积压消息让 OnClose 尽早触发，再交 AutoReconnect 处理
+#if !UNITY_WEBGL || UNITY_EDITOR
+        websocket?.DispatchMessageQueue();
+#endif
+        AutoReconnect.OnEnterForeground();
+        if (!AutoReconnect.IsActive) {
+            CheckDisconnectOnForeground();
+        }
+    }
+
+    private void OnApplicationFocus(bool hasFocus) {
+        if (hasFocus) {
+#if !UNITY_WEBGL || UNITY_EDITOR
+            websocket?.DispatchMessageQueue();
+#endif
+            AutoReconnect.OnEnterForeground();
+            if (!AutoReconnect.IsActive) {
+                CheckDisconnectOnForeground();
+            }
+        } else {
+            AutoReconnect.OnEnterBackground();
+        }
     }
 
     private void CheckDisconnectOnForeground() {
@@ -135,8 +224,39 @@ public class NetworkManager : MonoBehaviour {
         websocket?.DispatchMessageQueue();
 #endif
         if (websocket == null || websocket.State != WebSocketState.Open) {
+            if (AutoReconnect.TryHandleForegroundDisconnect()) return;
             MarkDisconnected();
         }
+    }
+
+    public WebSocket BeginNewConnection() {
+        if (websocket != null) {
+            try { var _ = websocket.Close(); } catch { }
+        }
+
+        lock (messageQueue) {
+            messageQueue.Clear();
+            priorityMessageQueue.Clear();
+        }
+
+        _latencyMs = -1;
+        _pingTimer = PingIntervalSeconds;
+        _lastPongElapsed = 0f;
+        _lastPingTs = 0;
+        _disconnectDialogState = DisconnectDialogState.Start;
+        isConnecting = false;
+
+        playerId = System.Guid.NewGuid().ToString();
+        string url = $"{ConfigManager.gameUrl}/{playerId}";
+        WebSocket newSocket = new WebSocket(url);
+        websocket = newSocket;
+        BindWebSocketEvents(newSocket);
+
+        isConnecting = true;
+        Debug.Log($"[NetworkManager] 新建 WebSocket 连接：{url}");
+        RunConnectLoop(newSocket);
+
+        return newSocket;
     }
 
     /// <summary>
@@ -179,6 +299,7 @@ public class NetworkManager : MonoBehaviour {
 
         lock (messageQueue) {
             messageQueue.Clear();
+            priorityMessageQueue.Clear();
         }
 
         _latencyMs = -1;
@@ -209,7 +330,10 @@ public class NetworkManager : MonoBehaviour {
 
         Debug.LogError($"[NetworkManager] WebSocket 重连超时或失败，State={newSocket.State}");
         isConnecting = false;
-        LoginPanel.Instance?.ConnectErrorText("无法连接至服务器，请稍后重试");
+        if (IsOnLoginPage()) {
+            LoginPanel.Instance?.ConnectErrorText("无法连接至服务器，请稍后重试");
+        }
+        HandleConnectionLostUi();
     }
 
     /// <summary>
@@ -223,7 +347,12 @@ public class NetworkManager : MonoBehaviour {
             Debug.LogError($"[NetworkManager] WebSocket Connect 异常: {e.Message}");
             if (ws == websocket) {
                 isConnecting = false;
-                ExecuteOnMainThread(() => LoginPanel.Instance?.ConnectErrorText(e.Message));
+                ExecuteOnMainThread(() => {
+                    if (IsOnLoginPage()) {
+                        LoginPanel.Instance?.ConnectErrorText(e.Message);
+                    }
+                    HandleConnectionLostUi();
+                });
             }
         }
     }
@@ -237,23 +366,18 @@ public class NetworkManager : MonoBehaviour {
         }
     }
 
-
     // 网络管理器实例在 Update 中处理消息队列
     private void Update(){
         // 非WebGL平台需要调用DispatchMessageQueue来处理WebSocket消息
-        #if !UNITY_WEBGL || UNITY_EDITOR
+#if !UNITY_WEBGL || UNITY_EDITOR
         websocket?.DispatchMessageQueue();
-        #endif
-        
-        // 处理消息队列
-        if (messageQueue.Count > 0) {
-            byte[] message;
-            lock(messageQueue) {
-                message = messageQueue.Dequeue();
-            }
+#endif
+
+        // 处理消息队列（match/match_found 等优先消息先于普通队列）
+        if (TryDequeueNextMessage(out byte[] message)) {
             Get_Message(message);
         }
-        
+
         // 处理主线程调度器
         if (mainThreadActions.Count > 0) {
             Action action;
@@ -300,7 +424,29 @@ public class NetworkManager : MonoBehaviour {
         int rtt = (int)Math.Max(0, now - sendTs);
         _latencyMs = rtt;
         _lastPongElapsed = 0f;
+        ProbePongReceived = true;
         OnLatencyChanged?.Invoke(_latencyMs);
+    }
+
+    public void ResetProbePongFlag() {
+        ProbePongReceived = false;
+    }
+
+    public bool SendProbePing() {
+        if (websocket == null || websocket.State != WebSocketState.Open) return false;
+        try {
+            ProbePongReceived = false;
+            _lastPingTs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var request = new PingRequest {
+                type = "ping",
+                client_ts = _lastPingTs,
+            };
+            // fire-and-forget，异常由 SendPing 内部处理
+            _ = websocket.SendText(JsonConvert.SerializeObject(request));
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     // 主线程调度器方法
@@ -312,6 +458,7 @@ public class NetworkManager : MonoBehaviour {
 
     // 处理登录响应
     private void HandleLoginResponse(Response response){
+        AutoReconnect.OnLoginResponse(response.success);
         if (response.success) {
             WindowsManager.Instance.SwitchWindow("menu");
             // 设置用户信息
@@ -331,9 +478,6 @@ public class NetworkManager : MonoBehaviour {
                     response.user_settings.voice_id
                 );
             }
-            if (response.user_config != null) {
-                ConfigManager.Instance.SetUserConfig(response.user_config.volume);
-            }
             if (response.rank_data != null) {
                 UserDataManager.Instance.SetRankData(
                     response.rank_data.guobiao_rank,
@@ -344,6 +488,7 @@ public class NetworkManager : MonoBehaviour {
             }
             UserContainer.Instance.ShowUserSettings(response.user_settings);
             FriendNetworkManager.Instance?.ListFriends();
+            EventNetworkManager.Instance?.ListMyActiveEvents();
         }
     }
 
@@ -359,7 +504,7 @@ public class NetworkManager : MonoBehaviour {
         }
     }
 
-    // 3.Get_Message方法用于处理服务器返回的消息 
+    // 3.Get_Message方法用于处理服务器返回的消息
     private void Get_Message(byte[] bytes){
         try{
             string jsonStr = System.Text.Encoding.UTF8.GetString(bytes);
@@ -375,10 +520,18 @@ public class NetworkManager : MonoBehaviour {
                 return;
             }
 
+            // 赛事相关消息统一交由 EventNetworkManager 处理
+            if (response.type != null && response.type.StartsWith("event/")) {
+                EventNetworkManager.Instance?.HandleEventMessage(response);
+                return;
+            }
+
             switch (response.type){
                 case "login":
                     HandleLoginResponse(response);
-                    NotificationManager.Instance.ShowTip("login",true,"登录成功");
+                    if (!AutoReconnect.ShouldSuppressLoginTip()) {
+                        NotificationManager.Instance.ShowTip("login",true,"登录成功");
+                    }
                     break;
                 case "get_server_stats": // 获取服务器统计信息
                     DisplayServerStats(response.server_stats);
@@ -388,6 +541,8 @@ public class NetworkManager : MonoBehaviour {
                     break;
                 case "error_message":
                     Debug.Log($"错误消息: {response.message}");
+                    // 加入/创建失败时取消待进入，避免滞后 refresh_room_info 错误跳进房间页
+                    RoomNetworkManager.Instance.CancelPendingRoomEntry();
                     ErrorResponse.Invoke(response.success, response.message);
                     NotificationManager.Instance.ShowTip("error_message",false,response.message);
                     break;
@@ -395,20 +550,23 @@ public class NetworkManager : MonoBehaviour {
                 case "room/create_room_done":
                 case "room/get_room_list":
                 case "room/refresh_room_info":
+                case "room/sync_not_in_room":
                 case "room/join_room_done":
                 case "room/leave_room_done":
-                    RoomNetworkManager.Instance?.HandleRoomMessage(response);
+                    RoomNetworkManager.Instance.HandleRoomMessage(response);
                     break;
                 // 数据相关消息交由 DataNetworkManager 处理
                 case "data/get_record_list":
                 case "data/get_record_by_id":
+                case "data/update_record_favorite":
                 case "data/get_guobiao_stats":
                 case "data/get_riichi_stats":
                 case "data/get_qingque_stats":
                 case "data/get_classical_stats":
+                case "data/get_jiandan_stats":
                 case "data/get_leaderboard":
                 case "data/get_rank_record_list":
-                    DataNetworkManager.Instance?.HandleDataMessage(response);
+                    DataNetworkManager.Instance.HandleDataMessage(response);
                     break;
                 // 观战系统：初始牌谱 / 增量更新 → GameRecordManager
                 case "spectator/record_init":
@@ -469,17 +627,33 @@ public class NetworkManager : MonoBehaviour {
                 case "gamestate/sichuan/ready_status":
                 case "gamestate/sichuan/ask_dingque":
                 case "gamestate/sichuan/dingque_done":
+                case "gamestate/changsha/game_start":
+                case "gamestate/changsha/broadcast_hand_action":
+                case "gamestate/changsha/ask_other_action":
+                case "gamestate/changsha/do_action":
+                case "gamestate/changsha/show_result":
+                case "gamestate/changsha/game_end":
+                case "gamestate/changsha/ready_status":
+                case "gamestate/jiandan/game_start":
+                case "gamestate/jiandan/broadcast_hand_action":
+                case "gamestate/jiandan/ask_other_action":
+                case "gamestate/jiandan/do_action":
+                case "gamestate/jiandan/show_result":
+                case "gamestate/jiandan/game_end":
+                case "gamestate/jiandan/ready_status":
                 case "switch_seat":
                 case "refresh_player_tag_list":
                 case "gamestate/broadcast_sticker":
-                    GameStateNetworkManager.Instance?.HandleGameStateMessage(response);
+                case "gamestate/vote_update":
+                case "gamestate/vote_end":
+                    GameStateNetworkManager.Instance.HandleGameStateMessage(response);
                     break;
                 // 匹配系统消息交由 MatchNetworkManager 处理
                 case "match/join_queue_done":
                 case "match/leave_queue_done":
                 case "match/queue_status":
                 case "match/match_found":
-                    MatchNetworkManager.Instance?.HandleMatchMessage(response);
+                    MatchNetworkManager.Instance.HandleMatchMessage(response);
                     break;
 
                 case "get_player_info":
@@ -493,12 +667,21 @@ public class NetworkManager : MonoBehaviour {
 
                 case "tips":
                     // 服务端验证失败的提示并重置按钮
+                    // AutoReconnect 时，视为登录失败信号
+                    if (AutoReconnect.IsActive) {
+                        AutoReconnect.OnLoginResponse(false);
+                    }
                     NotificationManager.Instance.ShowTip("验证", false, response.message);
                     LoginPanel.Instance.ResetLoginButton();
                     break;
 
                 case "message":
                     // 处理服务端发送的消息（版本不匹配、账户被顶替、重连提示等）
+                    // AutoReconnect 时静默接受 reconnect_ask
+                    if (response.message == "reconnect_ask" && AutoReconnect.ShouldAutoAcceptReconnectAsk()) {
+                        ReconnectResponse(true);
+                        break;
+                    }
                     // 传入 title, content 以及 message 标识符 (error_version/login_kickout/reconnect_ask)
                     if (response.message == "error_version") {
                         _disconnectDialogState = DisconnectDialogState.NoMatch;
@@ -506,14 +689,14 @@ public class NetworkManager : MonoBehaviour {
                         _disconnectDialogState = DisconnectDialogState.Shown;
                     }
                     NotificationManager.Instance.ShowMessage(
-                        response.message_info.title, 
-                        response.message_info.content, 
+                        response.message_info.title,
+                        response.message_info.content,
                         response.message
                     );
 
                     LoginPanel.Instance.ResetLoginButton();
                     break;
-                
+
                 default:
                     NotificationManager.Instance.ShowTip("未知的消息类型", false,"未知的消息类型");
                     throw new Exception($"未知的消息类型: {response.type}");
@@ -524,40 +707,74 @@ public class NetworkManager : MonoBehaviour {
             Debug.LogError($"消息处理错误: {e.Message}\n{e.StackTrace}");  // 添加堆栈信息
         }
     }
-    
 
     // ========== 观战消息处理 ==========
 
+    /// <summary>
+    /// 服务端下发初始牌谱（add_spectator 成功后的 record_init）：先切 game 窗，再 StartSpectating。
+    /// 不在点击观战按钮时切页，仅由本消息驱动。
+    /// </summary>
     private void HandleSpectatorRecordInit(Response response) {
         if (!response.success) {
             Debug.LogWarning($"观战初始数据失败: {response.message}");
+            GameRecordManager.ClearDelayedSpectatorSession();
+            return;
+        }
+        if (!AcceptDelayedSpectatorPayload(response)) {
+            Debug.Log("忽略非当前会话的延时观战 record_init");
             return;
         }
         string recordJson = response.message_info?.content;
         if (string.IsNullOrEmpty(recordJson)) {
             Debug.LogError("观战初始数据为空");
+            GameRecordManager.ClearDelayedSpectatorSession();
             return;
         }
+        StartCoroutine(CoEnterDelayedSpectatorFromRecordInit(recordJson));
+    }
+
+    private IEnumerator CoEnterDelayedSpectatorFromRecordInit(string recordJson) {
+        if (BlocksIncomingDelayedSpectatorSession()) {
+            Debug.Log("忽略延时观战 record_init：当前已在匹配或对局/其它观战会话中");
+            GameRecordManager.AbandonDelayedSpectatorSessionOnServer();
+            yield break;
+        }
+
         WindowsManager.Instance.SwitchWindow("game");
-        GameRecordManager.Instance.StartSpectating(recordJson);
+        yield return null;
+
+        var grm = GameRecordManager.Instance;
+        if (grm == null) {
+            Debug.LogError("观战 record_init：GameRecordManager 未就绪");
+            yield break;
+        }
+
+        grm.StartSpectating(recordJson);
+        if (!grm.IsSpectating) {
+            GameRecordManager.AbandonDelayedSpectatorSessionOnServer();
+        }
     }
 
     private void HandleSpectatorRecordUpdate(Response response) {
-        if (!response.success) return;
+        if (!response.success || !AcceptDelayedSpectatorPayload(response)) return;
         string updatesJson = response.message_info?.content;
         if (string.IsNullOrEmpty(updatesJson)) return;
-        GameRecordManager.Instance.AppendSpectatorTicks(updatesJson);
+        GameRecordManager.Instance?.AppendSpectatorTicks(updatesJson);
     }
 
     private void HandleSpectatorRecordComplete(Response response) {
-        string msg = string.IsNullOrEmpty(response.message) ? "游戏对局结束，已获取全部对局记录" : response.message;
-        NotificationManager.Instance?.ShowTip("观战", true, msg);
         if (GameRecordManager.Instance == null) return;
+        if (!GameRecordManager.Instance.IsSpectating || !AcceptDelayedSpectatorPayload(response)) {
+            Debug.Log("忽略迟到/非本场的延时观战 record_complete");
+            return;
+        }
+
+        string msg = string.IsNullOrEmpty(response.message) ? "游戏对局结束，已获取全部对局记录" : response.message;
+        NotificationManager.Instance.ShowTip("观战", true, msg);
 
         string recordJson = response.message_info?.content;
         if (!string.IsNullOrEmpty(recordJson)) {
             try {
-                WindowsManager.Instance.SwitchWindow("game");
                 GameRecordManager.Instance.StartSpectating(recordJson);
             } catch (Exception e) {
                 Debug.LogError($"加载完整观战牌谱失败: {e.Message}");
@@ -566,19 +783,41 @@ public class NetworkManager : MonoBehaviour {
         if (GameRecordManager.Instance.IsSpectating) {
             GameRecordManager.Instance.SwitchToRecordMode();
         }
+        GameRecordManager.ClearDelayedSpectatorSession();
     }
 
     private void HandleSpectatorAddResult(Response response) {
         if (response.success) {
-            NotificationManager.Instance?.ShowTip("观战", true, response.message);
+            NotificationManager.Instance.ShowTip("观战", true, response.message);
         } else {
-            NotificationManager.Instance?.ShowTip("观战", false, response.message);
+            GameRecordManager.ClearDelayedSpectatorSession();
+            NotificationManager.Instance.ShowTip("观战", false, response.message);
         }
     }
 
     private void HandleSpectatorRemoveResult(Response response) {
         Debug.Log($"观战移除: {response.message}");
-        PostGameNavigator.ExitToSpectator();
+        // 客户端退出时已 StopSpectating；迟到的上一场 remove 回包不得踢掉当前观战
+        if (GameRecordManager.Instance != null && GameRecordManager.Instance.IsSpectating) return;
+        GameRecordManager.ClearDelayedSpectatorSession();
+    }
+
+    /// <summary>message_info.title 必须为当前延时观战的 gamestate_id。</summary>
+    private static bool AcceptDelayedSpectatorPayload(Response response) {
+        // 会话 id 为 static：冷启动 GamePanel 未激活时 Instance 可能仍为 null
+        return GameRecordManager.IsCurrentDelayedSpectator(response.message_info?.title);
+    }
+
+    /// <summary>
+    /// 是否应拒绝延时观战 record_init：不含「已发出 add_spectator、等待 record_init」的待加入状态。
+    /// </summary>
+    private static bool BlocksIncomingDelayedSpectatorSession() {
+        if (LobbyStateGuard.IsInMatchQueue) return true;
+        var gsm = NormalGameStateManager.Instance;
+        if (gsm != null && (gsm.IsGameActive || gsm.IsRealtimeSpectator)) return true;
+        var grm = GameRecordManager.Instance;
+        if (grm != null && grm.IsSpectating) return true;
+        return false;
     }
 
     // 发送发布版版本号
@@ -629,7 +868,6 @@ public class NetworkManager : MonoBehaviour {
     // 房间相关方法已移至 RoomNetworkManager
     // 游戏状态相关方法已移至 GameStateNetworkManager
 
-
     // 4.11 游客登录方法 TouristLogin 从LoginPanel发送
     public void TouristLogin() {
         try {
@@ -673,7 +911,6 @@ public class NetworkManager : MonoBehaviour {
         };
         await websocket.SendText(JsonConvert.SerializeObject(request));
     }
-
 
     private async void OnApplicationQuit() {
         if (websocket != null && websocket.State == WebSocketState.Open)

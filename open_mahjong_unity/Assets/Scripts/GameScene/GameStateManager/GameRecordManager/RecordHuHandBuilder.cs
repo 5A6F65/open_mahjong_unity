@@ -43,9 +43,26 @@ public static class RecordHuHandBuilder {
     }
 
     /// <summary>
-    /// 构建和牌面板用手牌：荣和时在末尾追加和牌张（即使手牌中已有同 id，末张也可能是刚摸未切牌）。
+    /// 从 hu_* / hu_riichi tick 与推演手牌构建和牌展示数组。
     /// </summary>
-    public static int[] BuildDisplayHand(IReadOnlyList<int> closedHand, string huClass, int hepaiTile, int lastWinnableTileId) {
+    public static int[] BuildDisplayHandFromTick(
+        List<string> tick,
+        string rule,
+        IReadOnlyList<int> closedHand,
+        string huClass,
+        int lastWinnableTileId) {
+        TryParseHepaiTile(tick, rule, out int hepaiTile);
+        return BuildDisplayHand(closedHand, huClass, hepaiTile, lastWinnableTileId);
+    }
+
+    /// <summary>
+    /// 构建和牌面板用手牌：荣和时在末尾追加和牌张（状态推演已写入荣和张时不再重复追加）。
+    /// </summary>
+    public static int[] BuildDisplayHand(
+        IReadOnlyList<int> closedHand,
+        string huClass,
+        int hepaiTile,
+        int lastWinnableTileId) {
         if (closedHand == null || closedHand.Count == 0) return Array.Empty<int>();
         int[] hand = new int[closedHand.Count];
         for (int i = 0; i < closedHand.Count; i++) hand[i] = closedHand[i];
@@ -54,6 +71,10 @@ public static class RecordHuHandBuilder {
 
         int winTile = hepaiTile >= 10 ? hepaiTile : (lastWinnableTileId >= 10 ? lastWinnableTileId : 0);
         if (winTile <= 10) return hand;
+
+        if (hand.Length > 0 && hand[hand.Length - 1] == winTile) {
+            return hand;
+        }
 
         int[] extended = new int[hand.Length + 1];
         Array.Copy(hand, extended, hand.Length);

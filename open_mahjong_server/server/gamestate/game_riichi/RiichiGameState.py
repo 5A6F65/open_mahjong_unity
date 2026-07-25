@@ -24,6 +24,7 @@ from .action_check import (
 )
 from .wait_action import wait_action, _commit_pending_riichi
 from ..public.spectator_rules import too_many_ai_for_spectator
+from ..public.vote_manager import vote_checkpoint
 from .init_tiles import init_riichi_tiles
 from .boardcast import (
     broadcast_game_start,
@@ -142,6 +143,8 @@ class RiichiPlayer:
         # 立直家本应横置的下一张弃牌待标记位：宣告立直时置 True；本次切完归 False；
         # 若立直宣告的横置弃牌被他家吃/碰则在 chi/peng/gang 处理处再次置 True，使下一张续横
         self.riichi_marker_pending: bool = False
+        # 立直宣告后供托尚未提交时若该张被鸣，提交时不再补一发
+        self.skip_ippatsu: bool = False
         self.has_draw_slot = False
 
     def get_tile(self, tiles_list, *, mark_draw_slot: bool = True):
@@ -192,6 +195,8 @@ class RiichiGameState:
         self.room_rule = room_data["room_rule"]
         self.room_type = room_data["room_type"]
         self.sub_rule = room_data.get("sub_rule") or "riichi/standard"
+        self.match_tier = room_data.get("match_tier")
+        self.event_id = room_data.get("event_id")
 
         self.room_random_seed = room_data.get("random_seed", 0)
         self.open_cuohe = room_data.get("open_cuohe", False)
@@ -206,6 +211,14 @@ class RiichiGameState:
         self.hepai_way: str = room_data.get("hepai_way", "multi_ron")  # head_bump / multi_ron / three_ron_abort
         self.open_xiru: bool = room_data.get("open_xiru", True)
         self.open_tobi: bool = room_data.get("open_tobi", True)
+        # 起手分：未指定时由子规则决定（标准 25000 / 浪涌 50000）；可房间级覆盖或 per-player 设置
+        raw_starting = room_data.get("starting_score")
+        self.starting_score: Optional[int] = int(raw_starting) if raw_starting is not None else None
+        raw_starting_scores = room_data.get("starting_scores")
+        if raw_starting_scores and len(raw_starting_scores) == 4:
+            self.starting_scores: Optional[List[int]] = [int(x) for x in raw_starting_scores]
+        else:
+            self.starting_scores = None
 
         self._pending_ron_claims: dict = {}
         self.multi_ron_queue: Optional[list] = None
@@ -285,12 +298,17 @@ class RiichiGameState:
         await deliver_realtime_spectator_message(self, player_index, response)
 
     async def player_disconnect(self, user_id: int):
+        newly_offline = False
         for p in self.player_list:
             if p.user_id == user_id:
                 if "offline" not in p.tag_list:
                     p.tag_list.append("offline")
+                    newly_offline = True
                     await broadcast_refresh_player_tag_list(self)
                 break
+        if newly_offline:
+            from ..public.offline import schedule_offline_auto_on_disconnect
+            schedule_offline_auto_on_disconnect(self, user_id)
         non_ai = [p for p in self.player_list if p.user_id >= 10]
         if non_ai and all("offline" in p.tag_list for p in non_ai):
             await self.game_server.gamestate_manager.cleanup_game_state_complete(gamestate_id=self.gamestate_id)
@@ -344,12 +362,16 @@ class RiichiGameState:
         for i, p in enumerate(self.player_list):
             p.player_index = i
             p.original_player_index = i
-            p.score = self._starting_score()
+            p.score = self._player_starting_score(p.original_player_index)
         self.player_list.sort(key=lambda x: x.player_index)
 
         init_game_record(self)
         self.game_record["game_title"]["sub_rule"] = self.sub_rule
         self.game_record["game_title"]["red_dora"] = self.red_dora
+        if self.match_tier is not None:
+            self.game_record["game_title"]["match_tier"] = self.match_tier
+        if self.event_id is not None:
+            self.game_record["game_title"]["event_id"] = self.event_id
         if not self._is_langyong():
             self.game_record["game_title"]["allow_kuikae"] = self.allow_kuikae
         self.game_record["game_title"]["hepai_way"] = self.hepai_way
@@ -402,6 +424,7 @@ class RiichiGameState:
             await self.wait_action()
 
             while self.game_status != "END":
+                await vote_checkpoint(self)
                 match self.game_status:
                     case "deal_card":
                         if len(self.tiles_list) <= self.dead_wall_count:
@@ -499,71 +522,15 @@ class RiichiGameState:
 
             player_action_record_round_end(self)
 
-            # 准备阶段
-            # 与客户端 RoundEndPresentation / EndLiujuPanel / PenaltyPanel 的演出时长保持同步，
-            # 避免动画结束后还要在空白界面再等几秒。和牌画面较长（需阅读番符），其它流局以演出时长 + 0.5s 余量为准。
-            if self._multi_ron_ready_done:
-                self._multi_ron_ready_done = False
-            elif self.hu_class in ("hu_self", "hu_first", "hu_second", "hu_third"):
-                settle_result = self.result_dict.get(self.hu_class) or {}
-                fan_count = len(settle_result.get("yaku", []))
-                await run_synced_hu_ready_phase(self, fan_count, broadcast_ready_status)
-            elif self.hu_class == "ryuukyoku":
-                tenpai_indexes = [p.player_index for p in self.player_list if self._is_ryuukyoku_tenpai(p)]
-                noten_indexes = [p.player_index for p in self.player_list if not self._is_ryuukyoku_tenpai(p)]
-                wait_time = liuju_ready_wait_seconds(
-                    include_hand_reveal=bool(tenpai_indexes),
-                    has_draw_noten_penalty=bool(tenpai_indexes and noten_indexes),
-                )
-            elif self.hu_class in (
-                "jiuzhongjiupai",
-                "four_wind_abort",
-                "four_kan_abort",
-                "four_riichi_abort",
-                "three_ron_abort",
-            ):
-                wait_time = liuju_ready_wait_seconds()
-            else:
-                wait_time = 8.0
-
-            if self.hu_class not in ("hu_self", "hu_first", "hu_second", "hu_third"):
-                deadline = time.time() + wait_time
-                self.action_dict = {}
-                for p in self.player_list:
-                    if p.user_id <= 10:
-                        self.action_dict[p.player_index] = []
-                    else:
-                        self.action_dict[p.player_index] = ["ready"]
-                        p.remaining_time = math.ceil(wait_time)
-                self.game_status = "waiting_ready"
-                await broadcast_ready_status(self)
-                while any(self.action_dict[i] for i in self.action_dict):
-                    for p in self.player_list:
-                        if self.action_dict.get(p.player_index):
-                            p.remaining_time = max(0, int(deadline - time.time()))
-                    if await wait_action(self) is False:
-                        break
-
-            # 决定是否连庄
-            last_renchan = False
+            # —— 局终：连庄推进 / ready / 下一局 ——
+            # next_status 已在 _settle_round 广播前写好
             if self._cuohe_triggered:
-                # 错和：亲家不变、本场不增、仅更新随机种子；等同于"不加本场的连庄"重打
+                # 错和：亲家不变、本场不增
                 self.round_index += 1
-                last_renchan = True
             else:
-                winner_index = self._hu_winner_index()
-                oya_win = winner_index == 0 or self._multi_ron_any_oya_win
+                last_renchan = self._compute_last_renchan()
                 self._multi_ron_any_oya_win = False
-                oya_tenpai = False
-                if self.hu_class == "ryuukyoku":
-                    oya_tenpai = self._is_ryuukyoku_tenpai(self.player_list[0])
-                renchan = oya_win or (self.hu_class == "ryuukyoku" and oya_tenpai)
-                # 特殊流局也连庄
-                if self.hu_class in ("jiuzhongjiupai", "four_wind_abort", "four_kan_abort", "four_riichi_abort", "three_ron_abort"):
-                    renchan = True
-                last_renchan = renchan
-
-                if renchan:
+                if last_renchan:
                     self.honba += 1
                     self.round_index += 1
                 else:
@@ -575,10 +542,59 @@ class RiichiGameState:
                     self.round_index += 1
                     self._rotate_seats()
 
-            if not self._cuohe_triggered and self._riichi_match_should_end(last_renchan):
+            # ready（多响已在 sequence 内 ready 过；整场终场跳过）
+            if self._multi_ron_ready_done:
+                self._multi_ron_ready_done = False
+            elif self.next_status != "match_end":
+                if self.hu_class in ("hu_self", "hu_first", "hu_second", "hu_third"):
+                    settle_result = self.result_dict.get(self.hu_class) or {}
+                    fan_count = len(settle_result.get("yaku", []))
+                    await run_synced_hu_ready_phase(self, fan_count, broadcast_ready_status)
+                else:
+                    if self.hu_class == "ryuukyoku":
+                        tenpai_indexes = [
+                            p.player_index for p in self.player_list
+                            if self._is_ryuukyoku_tenpai(p)
+                        ]
+                        noten_indexes = [
+                            p.player_index for p in self.player_list
+                            if not self._is_ryuukyoku_tenpai(p)
+                        ]
+                        wait_time = liuju_ready_wait_seconds(
+                            include_hand_reveal=bool(tenpai_indexes),
+                            has_draw_noten_penalty=bool(tenpai_indexes and noten_indexes),
+                        )
+                    elif self.hu_class in (
+                        "jiuzhongjiupai",
+                        "four_wind_abort",
+                        "four_kan_abort",
+                        "four_riichi_abort",
+                        "three_ron_abort",
+                    ):
+                        wait_time = liuju_ready_wait_seconds()
+                    else:
+                        wait_time = 8.0
+
+                    deadline = time.time() + wait_time
+                    self.action_dict = {}
+                    for p in self.player_list:
+                        if p.user_id <= 10:
+                            self.action_dict[p.player_index] = []
+                        else:
+                            self.action_dict[p.player_index] = ["ready"]
+                            p.remaining_time = math.ceil(wait_time)
+                    self.game_status = "waiting_ready"
+                    await broadcast_ready_status(self)
+                    while any(self.action_dict[i] for i in self.action_dict):
+                        for p in self.player_list:
+                            if self.action_dict.get(p.player_index):
+                                p.remaining_time = max(0, int(deadline - time.time()))
+                        if await wait_action(self) is False:
+                            break
+
+            if self.next_status == "match_end":
                 break
 
-            # 清理局内状态
             for p in self.player_list:
                 p.hand_tiles = []
                 p.huapai_list = []
@@ -599,6 +615,7 @@ class RiichiGameState:
                 p.chi_candidates = {}
                 p.kuikae_forbidden_tiles = []
                 p.riichi_marker_pending = False
+                p.skip_ippatsu = False
                 for tag in list(p.tag_list):
                     if tag in ("riichi", "daburu_riichi", "ippatsu", "furiten") or tag.startswith("langyong_"):
                         p.tag_list.remove(tag)
@@ -618,7 +635,9 @@ class RiichiGameState:
                 match_type = f"{self.max_round}/4"
                 game_id = self.db_manager.store_riichi_game_record(self.game_record, self.player_list, self.room_type, match_type)
                 has_ai = any(p.user_id <= 10 for p in self.player_list)
-                if not has_ai and game_id:
+                if self.room_type == "events":
+                    logger.info(f'比赛场对局，仅保存牌谱，跳过统计数据保存，game_id: {game_id}')
+                elif not has_ai and game_id:
                     total_rounds = len(self.game_record.get("game_round", {}))
                     if hasattr(self.db_manager, "store_riichi_game_stats"):
                         self.db_manager.store_riichi_game_stats(game_id, self.player_list, self.room_type, self.max_round, total_rounds)
@@ -652,11 +671,18 @@ class RiichiGameState:
         return True
 
     def _starting_score(self) -> int:
+        if self.starting_score is not None:
+            return self.starting_score
         return 50000 if self._is_langyong() else 25000
+
+    def _player_starting_score(self, original_index: int) -> int:
+        if self.starting_scores is not None:
+            return self.starting_scores[original_index]
+        return self._starting_score()
 
     def _xiru_target_score(self) -> int:
         """西入延长/终了的目标分，随起始点数等比缩放（25000→30000，50000→60000）。"""
-        return 60000 if self._is_langyong() else 30000
+        return int(self._starting_score() * 30000 / 25000)
 
     def _langyong_call_count(self, player) -> int:
         """该玩家本局吃/碰/杠（含暗杠）次数；每个副露算一次（加杠由碰升级仍记一次）。"""
@@ -713,26 +739,64 @@ class RiichiGameState:
                 return i + 1
         return 4
 
-    def _riichi_match_should_end(self, renchan: bool) -> bool:
-        """非全庄西入延长战与击飞：判定整场是否在本局结束后终了。"""
+    def _riichi_match_should_end(self, renchan: bool, current_round: Optional[int] = None) -> bool:
+        """非全庄西入延长战与击飞：判定整场是否在本局结束后终了。
+
+        current_round 表示「推进后」的局号（连庄则仍为本局号，过庄则为 +1）。
+        半庄 scheduled=8 时：
+        - 南三过庄后 current_round=8 且未连庄：须打南四，不因有人已达标而提前终了；
+        - 南四结束且连庄：亲家一位且达到西入目标分则终了（不继续本场），否则继续本场；
+        - current_round>scheduled：西入延长战，按达标/亲家一位规则终了。
+        """
+        cr = self.current_round if current_round is None else current_round
         if self.open_tobi and any(p.score < 0 for p in self.player_list):
             return True
         scheduled = self.max_round * 4
         if self.max_round >= 4 or not self.open_xiru:
             return False
-        if self.current_round < scheduled:
+        if cr < scheduled:
             return False
-        if self.current_round == scheduled and renchan:
-            return False
+
         oya = self.player_list[0]
         oya_rank = self._riichi_oya_rank()
         target = self._xiru_target_score()
         anyone_target = any(p.score >= target for p in self.player_list)
+
+        if cr == scheduled:
+            if renchan:
+                # 南四（或南四本场）刚结束：亲家一位且达标 → 终了，不连庄打本场
+                if oya_rank == 1 and oya.score >= target:
+                    return True
+                return False
+            # 刚从上一局过庄（如南三→南四），预定末局尚未开打
+            return False
+
+        # 南四已打完并过庄，或西入延长局
         if oya_rank == 1 and oya.score >= target:
             return True
         if not renchan and anyone_target:
             return True
         return False
+
+    def _compute_last_renchan(self) -> bool:
+        """Settle 后、局数推进前：本局是否连庄（不修改状态）。"""
+        if self._cuohe_triggered:
+            return True
+        winner_index = self._hu_winner_index()
+        oya_win = winner_index == 0 or getattr(self, "_multi_ron_any_oya_win", False)
+        oya_tenpai = False
+        if self.hu_class == "ryuukyoku":
+            oya_tenpai = self._is_ryuukyoku_tenpai(self.player_list[0])
+        renchan = oya_win or (self.hu_class == "ryuukyoku" and oya_tenpai)
+        if self.hu_class in (
+            "jiuzhongjiupai",
+            "four_wind_abort",
+            "four_kan_abort",
+            "four_riichi_abort",
+            "three_ron_abort",
+        ):
+            renchan = True
+        return renchan
 
     # ========== 结算 ==========
 
@@ -751,6 +815,7 @@ class RiichiGameState:
 
     async def _settle_round(self):
         self.hepai_player_index = None
+        self.next_status = "round_end_by_ready"
         multi_queue = getattr(self, "multi_ron_queue", None)
         if multi_queue and len(multi_queue) > 1:
             await self._settle_multi_ron_sequence(multi_queue)
@@ -763,21 +828,28 @@ class RiichiGameState:
             if needs_cuohe and self.open_cuohe:
                 await self._settle_cuohe()
             else:
-                await self._settle_hu()
-        elif self.hu_class == "jiuzhongjiupai":
-            await broadcast_result(self, hepai_player_index=None, hu_class="jiuzhongjiupai")
-            player_action_record_liuju(self)
-        elif self.hu_class == "four_wind_abort":
-            await broadcast_result(self, hu_class="four_wind_abort")
-            player_action_record_liuju(self)
-        elif self.hu_class == "four_kan_abort":
-            await broadcast_result(self, hu_class="four_kan_abort")
-            player_action_record_liuju(self)
-        elif self.hu_class == "four_riichi_abort":
-            await broadcast_result(self, hu_class="four_riichi_abort")
-            player_action_record_liuju(self)
-        elif self.hu_class == "three_ron_abort":
-            await broadcast_result(self, hu_class="three_ron_abort")
+                await self._settle_hu(is_last_settle=True)
+        elif self.hu_class in (
+            "jiuzhongjiupai",
+            "four_wind_abort",
+            "four_kan_abort",
+            "four_riichi_abort",
+            "three_ron_abort",
+        ):
+            # 分数未变也可预判终场（击飞/西入等）
+            renchan = self._compute_last_renchan()
+            round_after = self.current_round if renchan else self.current_round + 1
+            ending = self._riichi_match_should_end(renchan, current_round=round_after)
+            if not ending:
+                scheduled = self.max_round * 4
+                if round_after > scheduled and (self.max_round >= 4 or not self.open_xiru):
+                    ending = True
+            self.next_status = "match_end" if ending else "round_end_by_ready"
+            await broadcast_result(
+                self,
+                hu_class=self.hu_class,
+                next_status=self.next_status,
+            )
             player_action_record_liuju(self)
         else:
             # 荒牌流局：听牌家均分 3000 分；供托立直棒留场，先结算尚未提交的立直供托
@@ -789,6 +861,14 @@ class RiichiGameState:
             has_penalty = bool(tenpai_indexes and noten_indexes)
             tenpai_tiles = {p.player_index: sorted(p.waiting_tiles) for p in self.player_list if self._is_ryuukyoku_tenpai(p)}
             tenpai_hands = {p.player_index: list(p.hand_tiles) for p in self.player_list if self._is_ryuukyoku_tenpai(p)}
+            renchan = self._compute_last_renchan()
+            round_after = self.current_round if renchan else self.current_round + 1
+            ending = self._riichi_match_should_end(renchan, current_round=round_after)
+            if not ending:
+                scheduled = self.max_round * 4
+                if round_after > scheduled and (self.max_round >= 4 or not self.open_xiru):
+                    ending = True
+            self.next_status = "match_end" if ending else "round_end_by_ready"
             await broadcast_result(
                 self,
                 hu_class="ryuukyoku",
@@ -799,6 +879,7 @@ class RiichiGameState:
                 tenpai_tiles=tenpai_tiles,
                 tenpai_hands=tenpai_hands,
                 exhaustive_penalty=has_penalty,
+                next_status=self.next_status,
             )
 
     async def _settle_multi_ron_sequence(self, queue: list) -> None:
@@ -811,6 +892,7 @@ class RiichiGameState:
             self.hu_class = hu_class
             self.ron_player_index = winner_index
             is_first = index == 0
+            is_last = index == len(queue) - 1
 
             await broadcast_do_action(
                 self,
@@ -828,12 +910,21 @@ class RiichiGameState:
             await self._settle_hu(
                 apply_honba=is_first,
                 apply_riichi_sticks=is_first,
+                is_last_settle=is_last,
             )
+            # 整场终场：最后一家跳过 ready，由 match_end 收尾；中间家仍需 ready
+            if is_last and self.next_status == "match_end":
+                continue
             await run_synced_hu_ready_phase(self, fan_count, broadcast_ready_status)
 
         self._multi_ron_ready_done = True
 
-    async def _settle_hu(self, apply_honba: bool = True, apply_riichi_sticks: bool = True):
+    async def _settle_hu(
+        self,
+        apply_honba: bool = True,
+        apply_riichi_sticks: bool = True,
+        is_last_settle: bool = False,
+    ):
         result = self.result_dict.get(self.hu_class)
         if not result:
             logger.error("和牌结算未获得结果")
@@ -930,6 +1021,18 @@ class RiichiGameState:
         for p in self.player_list:
             p.score += score_changes[p.player_index]
 
+        if is_last_settle:
+            renchan = self._compute_last_renchan()
+            round_after = self.current_round if renchan else self.current_round + 1
+            ending = self._riichi_match_should_end(renchan, current_round=round_after)
+            if not ending:
+                scheduled = self.max_round * 4
+                if round_after > scheduled and (self.max_round >= 4 or not self.open_xiru):
+                    ending = True
+            self.next_status = "match_end" if ending else "round_end_by_ready"
+        else:
+            self.next_status = "round_continue"
+
         winner = self.player_list[winner_index]
         stats_yaku = [y for y in yaku if y != "错和"]
         winner.record_counter.recorded_fans.append(stats_yaku)
@@ -982,6 +1085,7 @@ class RiichiGameState:
             langyong_multiplier=langyong_multiplier,
             langyong_scored_points=langyong_scored_points,
             silent=True,
+            next_status=self.next_status,
         )
 
     async def _settle_cuohe(self):

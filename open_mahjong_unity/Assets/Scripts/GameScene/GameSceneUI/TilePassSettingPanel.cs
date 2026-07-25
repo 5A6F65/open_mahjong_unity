@@ -1,11 +1,14 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
-using TMPro;
 
 /// <summary>
-/// 牌张设置：勾选后不询问对应弃牌/加杠牌的一切鸣牌（含荣和；抢杠且未开「无视抢杠」时除外）。
-/// 层级：HintRow + 4 排牌张 + 1 排全选（万/条/饼/字/红宝/无视抢杠）。
+/// 牌张设置子面板。
+/// - 勾选牌张：命中河牌/加杠牌时不询问任何操作（含荣和/抢杠）。
+/// - 选中牌不自动自摸：开启且命中摸入牌时，在「自动胡牌」下跳过自动自摸（仍可手动和）；跨局保留。
+/// - 不吃/不碰/不明杠：逐项过滤对应鸣牌，不过和牌；三者全选时与主面板「自动过牌」联动。
+/// - 不点和：阻止自动荣和，并将点和纳入自动过牌判定（与未过滤鸣牌并存时不跳过，等待玩家）。
+/// - 不自摸/不抢杠：仅在「自动胡牌」开启时，分别阻止自动自摸/抢杠和。
 /// </summary>
 public class TilePassSettingPanel : MonoBehaviour {
     private static readonly int[][] RowTileIds = {
@@ -17,34 +20,68 @@ public class TilePassSettingPanel : MonoBehaviour {
 
     private static readonly int[] RedDoraTileIds = { 105, 205, 305 };
 
-    private const string HintText = "不询问以下选中的牌：";
-    private const int HintRowIndex = 0;
     private const int FirstTileRowIndex = 1;
-    private const int SelectAllRowIndex = 5;
-    private const int SelectAllRedDoraChildIndex = 4;
-    private const int IgnoreRobKongChildIndex = 5;
 
-    [Header("说明（可留空，自动从 HintRow 查找）")]
-    [SerializeField] private TMP_Text hintLabel;
-
-    [Header("牌张行（可留空，自动跳过 HintRow 后取 4 排）")]
+    [Header("牌张行（可留空，自动跳过说明行后取 4 排）")]
     [SerializeField] private Transform[] tileRows = new Transform[4];
 
-    [Header("全选（可留空，自动从第六排子物体查找 Toggle）")]
+    [Header("全选与行为（Inspector 拖拽赋值）")]
+    [SerializeField] private Toggle selectAllTilesToggle;
     [SerializeField] private Toggle selectAllManToggle;
     [SerializeField] private Toggle selectAllSouToggle;
     [SerializeField] private Toggle selectAllPinToggle;
     [SerializeField] private Toggle selectAllHonorToggle;
     [SerializeField] private Toggle selectAllRedDoraToggle;
-    [SerializeField] private Toggle ignoreRobKongToggle;
+    [SerializeField] private Toggle passChiToggle;
+    [SerializeField] private Toggle passPengToggle;
+    [SerializeField] private Toggle passMingGangToggle;
+    [SerializeField] private Toggle noRonToggle;
+    [SerializeField] private Toggle noTsumoToggle;
+    [SerializeField] private Toggle noRobKongToggle;
+    [SerializeField] private Toggle skipAutoTsumoOnSelectedToggle;
 
     private readonly HashSet<int> passTileIds = new HashSet<int>();
     private readonly Dictionary<int, Toggle> tileToggles = new Dictionary<int, Toggle>();
     private bool isWired;
     private bool isUpdatingSelectAll;
-    private bool ignoreRobKong;
+    private bool isSyncingMeldPassOptions;
+    private bool passChi;
+    private bool passPeng;
+    private bool passMingGang;
+    private bool noRon;
+    private bool noTsumo;
+    private bool noRobKong;
+    /// <summary>选中牌摸入时跳过自动自摸；默认开启，ResetSettings 不清空。</summary>
+    private bool skipAutoTsumoOnSelected = true;
 
-    public bool IgnoreRobKong => ignoreRobKong;
+    public bool PassChi => passChi;
+    public bool PassPeng => passPeng;
+    public bool PassMingGang => passMingGang;
+    public bool NoRon => noRon;
+    public bool NoTsumo => noTsumo;
+    public bool NoRobKong => noRobKong;
+    public bool SkipAutoTsumoOnSelected => skipAutoTsumoOnSelected;
+
+    public bool HasAnyMingPaiPassOption =>
+        passChi || passPeng || passMingGang || passTileIds.Count > 0;
+
+    /// <summary>「不吃/不碰/不明杠」变更时通知 AutoAction 同步「自动过牌」显示。</summary>
+    public System.Action OnMeldPassOptionsChanged;
+
+    public bool AreAllMeldPassOptionsEnabled => passChi && passPeng && passMingGang;
+
+    /// <summary>批量设置鸣牌过滤项；供主面板「自动过牌」级联调用。</summary>
+    public void SetMeldPassOptions(bool chi, bool peng, bool mingGang) {
+        isSyncingMeldPassOptions = true;
+        passChi = chi;
+        passPeng = peng;
+        passMingGang = mingGang;
+        SetSelectAllSilently(passChiToggle, chi);
+        SetSelectAllSilently(passPengToggle, peng);
+        SetSelectAllSilently(passMingGangToggle, mingGang);
+        isSyncingMeldPassOptions = false;
+        OnMeldPassOptionsChanged?.Invoke();
+    }
 
     public void Initialize() {
         WireIfNeeded();
@@ -54,16 +91,28 @@ public class TilePassSettingPanel : MonoBehaviour {
     public void ResetSettings() {
         isUpdatingSelectAll = true;
         passTileIds.Clear();
-        ignoreRobKong = false;
+        passChi = false;
+        passPeng = false;
+        passMingGang = false;
+        noRon = false;
+        noTsumo = false;
+        noRobKong = false;
         foreach (Toggle toggle in tileToggles.Values) {
             if (toggle != null) toggle.SetIsOnWithoutNotify(false);
         }
+        SetSelectAllSilently(selectAllTilesToggle, false);
         SetSelectAllSilently(selectAllManToggle, false);
         SetSelectAllSilently(selectAllSouToggle, false);
         SetSelectAllSilently(selectAllPinToggle, false);
         SetSelectAllSilently(selectAllHonorToggle, false);
         SetSelectAllSilently(selectAllRedDoraToggle, false);
-        SetSelectAllSilently(ignoreRobKongToggle, false);
+        SetSelectAllSilently(passChiToggle, false);
+        SetSelectAllSilently(passPengToggle, false);
+        SetSelectAllSilently(passMingGangToggle, false);
+        SetSelectAllSilently(noRonToggle, false);
+        SetSelectAllSilently(noTsumoToggle, false);
+        SetSelectAllSilently(noRobKongToggle, false);
+        // skipAutoTsumoOnSelected 跨局保留，不同步重置
         isUpdatingSelectAll = false;
     }
 
@@ -71,23 +120,28 @@ public class TilePassSettingPanel : MonoBehaviour {
         gameObject.SetActive(visible);
     }
 
+    /// <summary>当前询问牌是否在跳过列表中（命中则直接 pass，含荣和）。</summary>
     public bool ShouldAutoPassForCurrentDiscard() {
         NormalGameStateManager gsm = NormalGameStateManager.Instance;
-        if (gsm != null && gsm.IsQiangGangAsk && !ignoreRobKong) {
-            return false;
-        }
         if (gsm == null || gsm.currentAskCutTileId <= 0) return false;
-        return passTileIds.Contains(gsm.currentAskCutTileId);
+        return IsPassTile(gsm.currentAskCutTileId);
+    }
+
+    /// <summary>
+    /// 「选中牌不自动自摸」开启且摸入牌在跳过列表中时，跳过自动自摸（仍可手动和牌）。
+    /// </summary>
+    public bool ShouldAutoPassForDrawnTile(int drawnTileId) {
+        return skipAutoTsumoOnSelected && IsPassTile(drawnTileId);
+    }
+
+    private bool IsPassTile(int tileId) {
+        return tileId > 0 && passTileIds.Contains(tileId);
     }
 
     private void WireIfNeeded() {
         if (isWired) return;
 
-        ResolveHierarchyReferences();
-
-        if (hintLabel != null) {
-            hintLabel.text = HintText;
-        }
+        ResolveTileRowsIfNeeded();
 
         tileToggles.Clear();
         for (int rowIndex = 0; rowIndex < tileRows.Length && rowIndex < RowTileIds.Length; rowIndex++) {
@@ -99,50 +153,29 @@ public class TilePassSettingPanel : MonoBehaviour {
         WireSelectAllToggle(selectAllPinToggle, RowTileIds[2]);
         WireSelectAllToggle(selectAllHonorToggle, RowTileIds[3]);
         WireSelectAllToggle(selectAllRedDoraToggle, RedDoraTileIds);
+        WireSelectAllTilesToggle();
 
-        if (ignoreRobKongToggle != null) {
-            ignoreRobKongToggle.onValueChanged.RemoveAllListeners();
-            ignoreRobKongToggle.onValueChanged.AddListener(isOn => ignoreRobKong = isOn);
-        }
+        WireMeldPassToggle(passChiToggle, value => passChi = value);
+        WireMeldPassToggle(passPengToggle, value => passPeng = value);
+        WireMeldPassToggle(passMingGangToggle, value => passMingGang = value);
+        WireBehaviorToggle(noRonToggle, value => noRon = value);
+        WireBehaviorToggle(noTsumoToggle, value => noTsumo = value);
+        WireBehaviorToggle(noRobKongToggle, value => noRobKong = value);
+        WireBehaviorToggle(skipAutoTsumoOnSelectedToggle, value => skipAutoTsumoOnSelected = value);
+        SetSelectAllSilently(skipAutoTsumoOnSelectedToggle, skipAutoTsumoOnSelected);
 
         isWired = true;
     }
 
-    private void ResolveHierarchyReferences() {
-        if (transform.childCount <= SelectAllRowIndex) {
-            Debug.LogWarning("TilePassSettingPanel: 子物体不足，需要 HintRow + 4 排牌张 + 1 排全选。");
+    private void ResolveTileRowsIfNeeded() {
+        if (HasAssignedTileRows()) return;
+        if (transform.childCount <= FirstTileRowIndex + 3) {
+            Debug.LogWarning("TilePassSettingPanel: 子物体不足，需要说明行 + 4 排牌张。");
             return;
         }
 
-        if (hintLabel == null) {
-            Transform hintRow = transform.GetChild(HintRowIndex);
-            hintLabel = hintRow.GetComponentInChildren<TMP_Text>(true);
-        }
-
-        if (!HasAssignedTileRows()) {
-            for (int i = 0; i < 4; i++) {
-                tileRows[i] = transform.GetChild(FirstTileRowIndex + i);
-            }
-        }
-
-        Transform selectAllRow = transform.GetChild(SelectAllRowIndex);
-        if (selectAllManToggle == null && selectAllRow.childCount > 0) {
-            selectAllManToggle = FindToggleInCell(selectAllRow.GetChild(0));
-        }
-        if (selectAllSouToggle == null && selectAllRow.childCount > 1) {
-            selectAllSouToggle = FindToggleInCell(selectAllRow.GetChild(1));
-        }
-        if (selectAllPinToggle == null && selectAllRow.childCount > 2) {
-            selectAllPinToggle = FindToggleInCell(selectAllRow.GetChild(2));
-        }
-        if (selectAllHonorToggle == null && selectAllRow.childCount > 3) {
-            selectAllHonorToggle = FindToggleInCell(selectAllRow.GetChild(3));
-        }
-        if (selectAllRedDoraToggle == null && selectAllRow.childCount > SelectAllRedDoraChildIndex) {
-            selectAllRedDoraToggle = FindToggleInCell(selectAllRow.GetChild(SelectAllRedDoraChildIndex));
-        }
-        if (ignoreRobKongToggle == null && selectAllRow.childCount > IgnoreRobKongChildIndex) {
-            ignoreRobKongToggle = FindToggleInCell(selectAllRow.GetChild(IgnoreRobKongChildIndex));
+        for (int i = 0; i < 4; i++) {
+            tileRows[i] = transform.GetChild(FirstTileRowIndex + i);
         }
     }
 
@@ -184,10 +217,39 @@ public class TilePassSettingPanel : MonoBehaviour {
         return toggles[0];
     }
 
+    private void WireSelectAllTilesToggle() {
+        if (selectAllTilesToggle == null) return;
+        selectAllTilesToggle.onValueChanged.RemoveAllListeners();
+        selectAllTilesToggle.onValueChanged.AddListener(isOn => {
+            OnSelectAllChanged(RowTileIds[0], isOn);
+            OnSelectAllChanged(RowTileIds[1], isOn);
+            OnSelectAllChanged(RowTileIds[2], isOn);
+            OnSelectAllChanged(RowTileIds[3], isOn);
+            OnSelectAllChanged(RedDoraTileIds, isOn);
+        });
+    }
+
     private void WireSelectAllToggle(Toggle toggle, int[] tileIds) {
         if (toggle == null || tileIds == null) return;
         toggle.onValueChanged.RemoveAllListeners();
         toggle.onValueChanged.AddListener(isOn => OnSelectAllChanged(tileIds, isOn));
+    }
+
+    private void WireMeldPassToggle(Toggle toggle, System.Action<bool> setter) {
+        if (toggle == null || setter == null) return;
+        toggle.onValueChanged.RemoveAllListeners();
+        toggle.onValueChanged.AddListener(isOn => {
+            setter(isOn);
+            if (!isSyncingMeldPassOptions) {
+                OnMeldPassOptionsChanged?.Invoke();
+            }
+        });
+    }
+
+    private static void WireBehaviorToggle(Toggle toggle, System.Action<bool> setter) {
+        if (toggle == null || setter == null) return;
+        toggle.onValueChanged.RemoveAllListeners();
+        toggle.onValueChanged.AddListener(isOn => setter(isOn));
     }
 
     private void OnTileToggleChanged(int tileId, bool isOn) {
@@ -215,6 +277,13 @@ public class TilePassSettingPanel : MonoBehaviour {
     }
 
     private void RefreshSelectAllStates() {
+        bool allTilesSelected =
+            AreAllSelected(RowTileIds[0]) &&
+            AreAllSelected(RowTileIds[1]) &&
+            AreAllSelected(RowTileIds[2]) &&
+            AreAllSelected(RowTileIds[3]) &&
+            AreAllSelected(RedDoraTileIds);
+        SetSelectAllSilently(selectAllTilesToggle, allTilesSelected);
         SetSelectAllSilently(selectAllManToggle, AreAllSelected(RowTileIds[0]));
         SetSelectAllSilently(selectAllSouToggle, AreAllSelected(RowTileIds[1]));
         SetSelectAllSilently(selectAllPinToggle, AreAllSelected(RowTileIds[2]));

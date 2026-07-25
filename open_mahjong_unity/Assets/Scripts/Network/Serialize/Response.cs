@@ -18,7 +18,7 @@ public class RoomInfo {
     public bool has_password;
     public bool tips;
     public string host_name;
-    public int host_user_id;
+    public int host_user_id; // 空赛事房可为 0（无房主）；服务端勿再发 null
     public string room_name;
     public int game_round;
     public int round_timer;
@@ -28,12 +28,32 @@ public class RoomInfo {
     public bool open_cuohe; // 是否开启错和
     public bool show_moqie_hint; // 手摸切灰显（河牌摸切灰、手切正常）
     public bool tactical_call; // 战术鸣牌（国标/青雀）
+    public bool claim_protection; // 鸣牌保护（国标/青雀）
     public bool? red_dora;  // 立直麻将专属：是否启用赤宝牌
     public bool? allow_kuikae; // 立直麻将专属：是否允许食替
     public bool? open_xiru; // 立直麻将专属：是否西入
     public bool? open_tobi; // 立直麻将专属：是否击飞
     public string hepai_way; // 立直麻将专属：和牌方式 head_bump / multi_ron / three_ron_abort
     public bool? blood_battle; // 四川麻将专属：是否开启血战到底
+    public int open_kong_replacement_count;
+    public bool initial_hu_si_xi;
+    public bool initial_hu_ban_ban_hu;
+    public bool initial_hu_que_yi_se;
+    public bool initial_hu_liu_liu_shun;
+    public bool initial_hu_san_tong;
+    public int bird_count;
+    public bool dealer_bird;
+    public bool base_score_no_dealer;
+    public int small_hu_score;
+    public int big_hu_score;
+    public string event_id; // 赛事房间关联的赛事 ID
+}
+
+public class EventListEntry {
+    public string event_id;
+    public string name;
+    public string status;
+    public string role;
 }
 
 public class GameEndInfo { // 显示游戏结束结果
@@ -67,6 +87,9 @@ public class ShowResultInfo { // 显示结算结果
     public int? honba;                        // 本场数
     public int? riichi_sticks_collected;      // 和牌者收走的立直棒数
     public Dictionary<int, int> score_changes; // 点数变化 {original_player_index: delta}，全规则通用
+    public int[] initial_hu_dice;
+    public int[] initial_hu_bird_seats;
+    public Dictionary<string, int>[] initial_hu_payer_details;
     // 荒牌流局：各家听牌张 {player_index: [tile_id, ...]}，未听家不出现；以及是否发生不听罚符
     public Dictionary<int, int[]> tenpai_tiles;
     public Dictionary<int, int[]> tenpai_hands; // 荒牌流局：听牌家的实际手牌，用于倒牌展示
@@ -104,6 +127,8 @@ public class ShowResultInfo { // 显示结算结果
     public string liuju_step;                     // reveal_hu/settle_hu/chajiao/final（cha_refund 已并入 chajiao）
     public bool liuju_status_final;               // 流局逐家状态是否为最后一条
     public bool liuju_refund;                     // 该查叫面板内含刮风下雨退税（加“退税”标签 +0.5s）
+    /// <summary>本条结算后下一步："round_continue" | "round_end_by_ready" | "match_end"。</summary>
+    public string next_status;
 }
 
 public class ShowShuheWeiInfo { // 数和尾结算信息
@@ -116,6 +141,8 @@ public class ShowShuheWeiInfo { // 数和尾结算信息
     public int? hepai_player_index; // 和牌玩家索引（无和牌为空）
     public int[] hepai_player_hand; // 和牌玩家手牌
     public int[][] hepai_player_combination_mask; // 和牌玩家组合掩码
+    /// <summary>本条结算后下一步："round_continue" | "round_end_by_ready" | "match_end"。</summary>
+    public string next_status;
 }
 
 public class AskHandActionGBInfo { // 询问手牌操作
@@ -123,6 +150,7 @@ public class AskHandActionGBInfo { // 询问手牌操作
     public int remaining_time; // 剩余时间
     public int player_index; // 玩家索引
     public int remain_tiles; // 剩余牌数 只有摸牌以后牌堆牌数会减少
+    public int[] forced_cut_tiles;
     public int action_tick;
     // 立直麻将：可立直切牌候选 {tile_id: [waiting_tile_id, ...]}，仅 action_list 含 riichi_cut 时下发
     public Dictionary<int, int[]> riichi_candidate_cuts;
@@ -137,7 +165,7 @@ public class AskOtherActionGBInfo { // 询问切牌后操作
     public int action_tick;
     // 立直麻将赤宝牌吃牌候选：键为方向 "chi_left"/"chi_mid"/"chi_right"，值为每条候选的两张真实牌 ID（含 105/205/305）
     public System.Collections.Generic.Dictionary<string, int[][]> chi_candidates;
-    // 战术鸣牌：True 时表示这是申请阶段对更高优先级行为的再次询问，客户端使用战术倒计时
+    // 战术鸣牌：True 时表示申请阶段对更高优先级行为的再次询问；倒计时仍用 remaining_time
     public bool? is_tactical_recheck;
 }
 
@@ -145,10 +173,14 @@ public class DoActionInfo { // 执行操作
     public string[] action_list;
     public int action_player;
     public int action_tick;
+    public int? cut_from_player;      // 鸣牌（吃/碰/明杠）必填：被认走的打牌者座位索引；切牌等其它动作可空
+    public bool? sea_bottom_discard;  // 长沙海底牌翻开后进入牌河
     public int? cut_tile;           // 可空类型
+    public int[] cut_tiles;
     public int? cut_tile_index;     // 可空类型
     public bool? cut_class;         // 可空类型
     public int? deal_tile;          // 可空类型
+    public int[] deal_tiles;
     public int? buhua_tile;         // 可空类型
     public string combination_target; // 可空类型
     public int[] combination_mask;  // 数组可以为null
@@ -159,6 +191,8 @@ public class DoActionInfo { // 执行操作
     public bool? silent;
     // 暗杠/加杠：True=摸杠（末张参与），False=手杠
     public bool? is_mo_gang;
+    // 补花：True=摸补（末张花牌），False=手补
+    public bool? is_mo_buhua;
     // 四川刮风下雨：即时分变 {player_index: delta}
     public Dictionary<int, int> gang_score_changes;
     public string gang_score_type; // guafeng / xiayu1 / xiayu2
@@ -173,7 +207,7 @@ public class PlayerInfo { // 房间信息中单个玩家信息
     public int[] discard_origin_tiles;        // 理论弃牌
     public string[] combination_tiles;  // 组合牌
     public int[][] combination_mask;   // 组合牌掩码（二维数组，每个副露的掩码是一个子数组）
-    
+
     public int remaining_time;          // 剩余时间
     public int player_index;            // 东南西北位置 (改为player_index)
     public int original_player_index;   // 原始玩家索引 东南西北 0 1 2 3
@@ -186,6 +220,7 @@ public class PlayerInfo { // 房间信息中单个玩家信息
     public string[] score_history;      // 分数历史变化列表，每局记录 +？、-？ 或 0
     public int[] round_number_history;  // 实际每手对应局数（支持连庄重复）
     public string[] tag_list;           // 标签列表
+    public string[] initial_hu_types;   // 长沙麻将起手胡类型
     public bool[] discard_riichi_flags; // 立直规则：与 discard_tiles 同序的横置标记，重连/牌谱重建时还原横置弃牌
     public int dingque_suit;            // 四川麻将：定缺花色（1万/2饼/3条，0=未定缺），重连/初始同步
     public bool? is_hu;                 // 四川麻将·血战到底：该玩家本盘是否已和牌退场
@@ -211,6 +246,7 @@ public class GameInfo { // 游戏开始时传递房间信息
     public bool open_cuohe;             // 是否开启错和
     public bool show_moqie_hint;        // 手摸切灰显
     public bool tactical_call;          // 战术鸣牌（国标/青雀）
+    public bool claim_protection;       // 鸣牌保护（国标/青雀）
     public bool isPlayerSetRandomSeed;  // 是否设置随机种子
     public int[] player_entry_order;    // shuffle 前对局入场顺序 user_id[4]
     public PlayerInfo[] players_info;   // 玩家信息列表
@@ -226,6 +262,17 @@ public class GameInfo { // 游戏开始时传递房间信息
     public int? dealer_index;           // 当前亲家索引
     public int? view_player_index;      // 实时观战视角座位（客户端作为 self 渲染）
     public bool? blood_battle;          // 四川麻将：是否开启血战到底
+    public int? open_kong_replacement_count;
+    public bool? initial_hu_si_xi;
+    public bool? initial_hu_ban_ban_hu;
+    public bool? initial_hu_que_yi_se;
+    public bool? initial_hu_liu_liu_shun;
+    public bool? initial_hu_san_tong;
+    public int? bird_count;
+    public bool? dealer_bird;
+    public bool? base_score_no_dealer;
+    public int? small_hu_score;
+    public int? big_hu_score;
 }
 
 public class SwitchSeatInfo { // 换位信息
@@ -261,6 +308,7 @@ public class RecordInfo { // 游戏记录元数据（按游戏分组，包含4�
     public string match_queue_type;     // 排位队列（如 beginner_quanzhuang），可选
     public string created_at;           // 创建时间
     public PlayerRecordInfo[] players;  // 该游戏的4个玩家信息（按排名排序）
+    public bool is_favorite;            // 当前用户是否收藏
 }
 
 public class RecordDetail { // 完整的游戏牌谱记录（按ID查询时返回）
@@ -288,6 +336,8 @@ public class PlayerStatsInfo { // 玩家统计数据信息（单个规则和模�
     public int? third_place_count;    // 三位次数
     public int? fourth_place_count;    // 四位次数
     public int? fulu_round_count;      // 副露局数
+    public int? cuohe_count;           // 错和次数（国标）
+    public int? total_round_score;     // 累计小局净得分（国标局均点分子）
     public Dictionary<string, int> fan_stats; // 番种统计数据（字段名 -> 次数）
 }
 
@@ -303,7 +353,8 @@ public class UserSettings { // 用户设置信息（称号、头像、角色、�
 public class RuleStatsResponse { // 单个规则的统计数据响应
     public string rule;                    // 规则标识（guobiao/riichi）
     public PlayerStatsInfo[] history_stats; // 历史统计数据列表（按模式分组）
-    public Dictionary<string, int> total_fan_stats; // 汇总番种统计数据（所有模式的总和）
+    public Dictionary<string, int> total_fan_stats; // 汇总番种统计数据（普通对局，所有模式总和）
+    public Dictionary<string, int> ranked_fan_stats; // 天梯对局(_rank)番种统计（仅国标）
 }
 
 public class PlayerInfoResponse { // 玩家信息响应（包含所有统计数据）
@@ -395,6 +446,17 @@ public class StickerInfo {
     public string sticker;
 }
 
+public class VoteInfo { // 房间对局投票暂停/结束状态同步
+    public string phase;            // idle/voting/pause_pending/paused/resume_countdown/end_countdown
+    public string vote_type;        // "pause" / "end"
+    public int agree;               // 同意人数（仅真人）
+    public int refuse;              // 拒绝人数（仅真人）
+    public int total;               // 真人玩家数
+    public int countdown;           // 当阶段倒计时初值（秒），客户端本地递减
+    public Dictionary<string, string> votes; // {player_index: "agree"/"refuse"/"none"/"bot"}
+    public string reason;           // 取消原因等提示
+}
+
 public class Response { // 所有后端的返回数据都由Response类接收
     // 消息头
     public string type; // 消息类型
@@ -417,6 +479,8 @@ public class Response { // 所有后端的返回数据都由Response类接收
     public ReadyStatusInfo ready_status_info; // 准备状态信息
     public RecordInfo[] record_list; // 返回游戏记录列表（元数据）
     public RecordDetail record_detail; // 返回单个完整牌谱记录
+    public string game_id; // 更新收藏时回传牌谱ID
+    public bool is_favorite; // 更新收藏后回传
     public PlayerInfoResponse player_info; // 返回玩家信息
     public RuleStatsResponse rule_stats; // 返回单个规则的统计数据
     public LoginInfo login_info; // 返回登录信息
@@ -443,5 +507,6 @@ public class Response { // 所有后端的返回数据都由Response类接收
     public int[] kan_dora_indicators; // update_dora 顶层字段：杠宝牌指示牌
     public LeaderboardEntry[] leaderboard_list; // 国标段位排行榜
     public StickerInfo sticker_info; // 对局表情包广播
+    public VoteInfo vote_info; // 房间对局投票暂停/结束状态同步
+    public EventListEntry[] event_list; // 当前用户可建房的 active 赛事列表
 }
-

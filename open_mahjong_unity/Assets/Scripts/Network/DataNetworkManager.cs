@@ -8,12 +8,12 @@ using Newtonsoft.Json;
 /// 数据网络管理器 - 处理所有数据相关的网络通信（游戏记录、统计数据等）
 /// </summary>
 public class DataNetworkManager : MonoBehaviour {
-    
+
     public static DataNetworkManager Instance { get; private set; }
 
     private int _recordListPendingOffset;
     public const int RecordListPageSize = 20;
-    
+
     private void Awake() {
         if (Instance != null && Instance != this) {
             Destroy(gameObject);
@@ -21,14 +21,14 @@ public class DataNetworkManager : MonoBehaviour {
         }
         Instance = this;
     }
-    
+
     /// <summary>
     /// 获取 websocket 连接（通过 NetworkManager）
     /// </summary>
     private WebSocket GetWebSocket() {
-        return NetworkManager.Instance?.GetWebSocket();
+        return NetworkManager.Instance.GetWebSocket();
     }
-    
+
     /// <summary>
     /// 处理数据相关的服务器响应消息
     /// </summary>
@@ -39,6 +39,9 @@ public class DataNetworkManager : MonoBehaviour {
                 break;
             case "data/get_record_by_id":
                 HandleGetRecordByIdResponse(response);
+                break;
+            case "data/update_record_favorite":
+                HandleUpdateRecordFavoriteResponse(response);
                 break;
             case "data/get_guobiao_stats":
                 HandleGetGuobiaoStatsResponse(response);
@@ -52,6 +55,9 @@ public class DataNetworkManager : MonoBehaviour {
             case "data/get_classical_stats":
                 HandleGetClassicalStatsResponse(response);
                 break;
+            case "data/get_jiandan_stats":
+                HandleGetJiandanStatsResponse(response);
+                break;
             case "data/get_leaderboard":
                 HandleGetLeaderboardResponse(response);
                 break;
@@ -63,7 +69,7 @@ public class DataNetworkManager : MonoBehaviour {
                 break;
         }
     }
-    
+
     private void HandleGetRecordListResponse(Response response) {
         Debug.Log($"收到游戏记录列表: {response.message}");
         RecordPanel.Instance?.GetRecordListResponse(
@@ -73,7 +79,7 @@ public class DataNetworkManager : MonoBehaviour {
             _recordListPendingOffset
         );
     }
-    
+
     private void HandleGetRecordByIdResponse(Response response) {
         Debug.Log($"收到牌谱详情: {response.message}");
         if (!response.success) {
@@ -82,50 +88,62 @@ public class DataNetworkManager : MonoBehaviour {
         }
         RecordPanel.OpenRecord(response.record_detail);
     }
-    
+
+    private void HandleUpdateRecordFavoriteResponse(Response response) {
+        if (!response.success) {
+            NotificationManager.Instance.ShowTip("牌谱", false, response.message);
+        }
+        RecordPanel.Instance?.OnRecordFavoriteUpdated(
+            response.success,
+            response.game_id,
+            response.is_favorite,
+            response.message
+        );
+    }
+
     /// <summary>
     /// 处理获取国标统计数据响应
     /// </summary>
     private void HandleGetGuobiaoStatsResponse(Response response) {
         if (PlayerInfoPanel.Instance == null) return;
-        
+
         // 如果响应中包含玩家信息，先显示玩家信息
         if (response.player_info != null) {
             PlayerInfoPanel.Instance.ShowPlayerInfo(response.player_info);
         }
-        
+
         // 处理统计数据
         PlayerInfoPanel.Instance.OnGuobiaoStatsReceived(response.success, response.message, response.rule_stats);
     }
-    
+
     /// <summary>
     /// 处理获取立直统计数据响应
     /// </summary>
     private void HandleGetRiichiStatsResponse(Response response) {
         if (PlayerInfoPanel.Instance == null) return;
-        
+
         // 如果响应中包含玩家信息，先显示玩家信息
         if (response.player_info != null) {
             PlayerInfoPanel.Instance.ShowPlayerInfo(response.player_info);
         }
-        
+
         // 处理统计数据
         PlayerInfoPanel.Instance.OnRiichiStatsReceived(response.success, response.message, response.rule_stats);
     }
-    
+
     /// <summary>
     /// 处理获取青雀统计数据响应
     /// </summary>
     private void HandleGetQingqueStatsResponse(Response response) {
         if (PlayerInfoPanel.Instance == null) return;
-        
+
         if (response.player_info != null) {
             PlayerInfoPanel.Instance.ShowPlayerInfo(response.player_info);
         }
-        
+
         PlayerInfoPanel.Instance.OnQingqueStatsReceived(response.success, response.message, response.rule_stats);
     }
-    
+
     /// <summary>
     /// 处理获取古典麻将统计数据响应
     /// </summary>
@@ -137,6 +155,19 @@ public class DataNetworkManager : MonoBehaviour {
         }
 
         PlayerInfoPanel.Instance.OnClassicalStatsReceived(response.success, response.message, response.rule_stats);
+    }
+
+    /// <summary>
+    /// 处理获取简单麻将统计数据响应
+    /// </summary>
+    private void HandleGetJiandanStatsResponse(Response response) {
+        if (PlayerInfoPanel.Instance == null) return;
+
+        if (response.player_info != null) {
+            PlayerInfoPanel.Instance.ShowPlayerInfo(response.player_info);
+        }
+
+        PlayerInfoPanel.Instance.OnJiandanStatsReceived(response.success, response.message, response.rule_stats);
     }
 
     private void HandleGetLeaderboardResponse(Response response) {
@@ -156,25 +187,29 @@ public class DataNetworkManager : MonoBehaviour {
         Debug.Log($"收到观战列表: {response.message}");
         SpectatorPanel.Instance?.GetSpectatorListResponse(response.success, response.message, response.spectator_list);
     }
-    
+
     // ========== 数据相关的发送方法 ==========
-    
-    public async void GetRecordList(int offset = 0) {
+
+    public async void GetRecordList(int offset = 0, bool favoritesOnly = false) {
         try {
             _recordListPendingOffset = offset;
             var request = new GetRecordListRequest {
                 type = "data/get_record_list",
                 limit = RecordListPageSize,
-                offset = offset
+                offset = offset,
+                favorites_only = favoritesOnly
             };
-            Debug.Log($"发送获取游戏记录列表消息: {request.type}, offset={offset}, limit={RecordListPageSize}");
+            Debug.Log(
+                $"发送获取游戏记录列表消息: {request.type}, offset={offset}, " +
+                $"limit={RecordListPageSize}, favorites_only={favoritesOnly}"
+            );
             await GetWebSocket().SendText(JsonConvert.SerializeObject(request));
         } catch (Exception e) {
             Debug.LogError($"获取游戏记录列表失败: {e.Message}");
             RecordPanel.Instance?.GetRecordListResponse(false, e.Message, null, offset);
         }
     }
-    
+
     public async void GetRecordById(string gameId) {
         try {
             var request = new { type = "data/get_record_by_id", game_id = gameId };
@@ -185,7 +220,22 @@ public class DataNetworkManager : MonoBehaviour {
             NotificationManager.Instance.ShowTip("牌谱", false, $"获取牌谱失败: {e.Message}");
         }
     }
-    
+
+    public async void UpdateRecordFavorite(string gameId, bool isFavorite) {
+        try {
+            var request = new UpdateRecordFavoriteRequest {
+                type = "data/update_record_favorite",
+                game_id = gameId,
+                is_favorite = isFavorite
+            };
+            await GetWebSocket().SendText(JsonConvert.SerializeObject(request));
+        } catch (Exception e) {
+            Debug.LogError($"更新牌谱收藏失败: {e.Message}");
+            NotificationManager.Instance.ShowTip("牌谱", false, $"更新收藏失败: {e.Message}");
+            RecordPanel.Instance?.OnRecordFavoriteUpdated(false, gameId, !isFavorite, e.Message);
+        }
+    }
+
     /// <summary>
     /// 获取国标统计数据
     /// </summary>
@@ -254,6 +304,23 @@ public class DataNetworkManager : MonoBehaviour {
         }
     }
 
+    /// <summary>
+    /// 获取简单麻将统计数据
+    /// </summary>
+    public async void GetJiandanStats(string userid, bool need_player_info = false) {
+        try {
+            var request = new GetJiandanStatsRequest {
+                type = "data/get_jiandan_stats",
+                userid = userid,
+                need_player_info = need_player_info
+            };
+            await GetWebSocket().SendText(JsonConvert.SerializeObject(request));
+        } catch (Exception e) {
+            Debug.LogError($"获取简单麻将统计数据失败: {e.Message}");
+            PlayerInfoPanel.Instance?.OnJiandanStatsReceived(false, e.Message, null);
+        }
+    }
+
     public async void GetRankRecordList(int limit = 20) {
         try {
             var request = new GetRankRecordListRequest {
@@ -280,4 +347,3 @@ public class DataNetworkManager : MonoBehaviour {
         }
     }
 }
-

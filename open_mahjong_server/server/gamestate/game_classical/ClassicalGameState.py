@@ -21,10 +21,14 @@ from .boardcast import (
 )
 from ..public.logic_common import get_index_relative_position, next_current_index, next_current_num, assign_strict_final_ranks
 from .init_tiles import init_classical_tiles
-from ..public.next_game_round import next_game_round_random_switchseat
+from ..public.next_game_round import next_game_round_classical_switchseat
 from ..public.spectator_rules import too_many_ai_for_spectator
+from ..public.vote_manager import vote_checkpoint
 from ..public.game_record_manager import init_game_record, init_game_round, player_action_record_deal, player_action_record_angang, player_action_record_jiagang, player_action_record_chipenggang, player_action_record_hu, player_action_record_liuju, player_action_record_jiuzhongjiupai, player_action_record_shuhewei, player_action_record_round_end, end_game_record, build_score_changes_by_seat, build_score_changes_dict, capture_player_entry_order
-from ..public.round_end_timing import liuju_ready_wait_seconds, shuhewei_ready_wait_seconds
+from ..public.round_end_timing import (
+    liuju_ready_wait_seconds,
+    shuhewei_ready_wait_seconds,
+)
 from ...game_calculation.game_calculation_service import GameCalculationService
 from ...database.db_manager import DatabaseManager
 from ..public.random_seed_manager import setup_random_seed_system
@@ -123,6 +127,8 @@ class ClassicalGameState:
         self.room_rule = room_data["room_rule"]
         self.room_type = room_data["room_type"]
         self.sub_rule = room_data.get("sub_rule")
+        self.match_tier = room_data.get("match_tier")
+        self.event_id = room_data.get("event_id")
 
         self.room_random_seed = room_data.get("random_seed", 0)
         self.open_cuohe = room_data.get("open_cuohe", False)
@@ -180,12 +186,18 @@ class ClassicalGameState:
         await deliver_realtime_spectator_message(self, player_index, response)
 
     async def player_disconnect(self, user_id: int):
+        newly_offline = False
         for p in self.player_list:
             if p.user_id == user_id:
                 if "offline" not in p.tag_list:
                     p.tag_list.append("offline")
+                    newly_offline = True
                     await broadcast_refresh_player_tag_list(self)
                 break
+
+        if newly_offline:
+            from ..public.offline import schedule_offline_auto_on_disconnect
+            schedule_offline_auto_on_disconnect(self, user_id)
 
         non_ai_players = [p for p in self.player_list if p.user_id >= 10]
         if non_ai_players:
@@ -323,6 +335,10 @@ class ClassicalGameState:
         init_game_record(self)
         self.game_record["game_title"]["sub_rule"] = self.sub_rule
         self.game_record["game_title"]["hepai_limit"] = self.hepai_limit
+        if self.match_tier is not None:
+            self.game_record["game_title"]["match_tier"] = self.match_tier
+        if self.event_id is not None:
+            self.game_record["game_title"]["event_id"] = self.event_id
 
         while self.current_round <= self.max_round * 4:
 
@@ -385,6 +401,7 @@ class ClassicalGameState:
 
                 # 游戏主循环
                 while self.game_status != "END":
+                    await vote_checkpoint(self)
                     match self.game_status:
 
                         case "deal_card":
@@ -514,6 +531,16 @@ class ClassicalGameState:
                                        )
 
             shuhewei_extra_wait = 0.0
+            is_dealer_win = (
+                self.hu_class in ["hu_self", "hu_first", "hu_second", "hu_third"]
+                and hepai_player_index == 0
+            )
+            # 末局庄家和牌连庄续打，不算整场终场
+            self.next_status = (
+                "match_end"
+                if (self.current_round >= self.max_round * 4) and not is_dealer_win
+                else "round_end_by_ready"
+            )
             if self.hu_class != "jiuzhongjiupai":
                 shuhewei_extra_wait = await self._settle_shuhewei(
                     hepai_player_index=hepai_player_index,
@@ -521,6 +548,7 @@ class ClassicalGameState:
                     hepai_fan=hu_fan,
                     hepai_fu_types=hu_fu_fan_list,
                     hu_class=self.hu_class,
+                    next_status=self.next_status,
                 )
 
             record_fulu_rounds_for_players(self.player_list)
@@ -549,42 +577,43 @@ class ClassicalGameState:
                 player_action_record_liuju(self)
             player_action_record_round_end(self)
 
-            if self.hu_class == "jiuzhongjiupai":
-                await asyncio.sleep(liuju_ready_wait_seconds())
-            else:
-                wait_time = shuhewei_ready_wait_seconds(
-                    shuhewei_extra_wait,
-                    self.hu_class in ["hu_self", "hu_first", "hu_second", "hu_third"],
-                )
-                ready_phase_deadline = time.time() + wait_time
+            # 整场最后一局跳过 waiting_ready（含九种九牌 sleep），由客户端 match_end 收尾
+            if self.next_status != "match_end":
+                if self.hu_class == "jiuzhongjiupai":
+                    await asyncio.sleep(liuju_ready_wait_seconds())
+                else:
+                    wait_time = shuhewei_ready_wait_seconds(
+                        shuhewei_extra_wait,
+                        self.hu_class in ["hu_self", "hu_first", "hu_second", "hu_third"],
+                    )
+                    ready_phase_deadline = time.time() + wait_time
 
-                self.action_dict = {}
-                for player in self.player_list:
-                    if player.user_id <= 10:
-                        self.action_dict[player.player_index] = []
-                    else:
-                        self.action_dict[player.player_index] = ["ready"]
-                        player.remaining_time = math.ceil(wait_time)
+                    self.action_dict = {}
+                    for player in self.player_list:
+                        if player.user_id <= 10:
+                            self.action_dict[player.player_index] = []
+                        else:
+                            self.action_dict[player.player_index] = ["ready"]
+                            player.remaining_time = math.ceil(wait_time)
 
-                self.game_status = "waiting_ready"
-                await broadcast_ready_status(self)
-                while any(self.action_dict[i] for i in self.action_dict):
-                    for p in self.player_list:
-                        if self.action_dict.get(p.player_index):
-                            p.remaining_time = max(0, int(ready_phase_deadline - time.time()))
-                    if await wait_action(self) is False:
-                        break
+                    self.game_status = "waiting_ready"
+                    await broadcast_ready_status(self)
+                    while any(self.action_dict[i] for i in self.action_dict):
+                        for p in self.player_list:
+                            if self.action_dict.get(p.player_index):
+                                p.remaining_time = max(0, int(ready_phase_deadline - time.time()))
+                        if await wait_action(self) is False:
+                            break
 
-            is_dealer_win = (
-                self.hu_class in ["hu_self", "hu_first", "hu_second", "hu_third"]
-                and hepai_player_index == 0
-            )
-            next_game_round_random_switchseat(
+            if self.next_status == "match_end":
+                logger.info("最后一局结束，不再推进局数")
+                break
+
+            next_game_round_classical_switchseat(
                 self,
                 keep_current_round=is_dealer_win,
                 keep_dealer_seat=is_dealer_win,
             )
-
             logger.info(f"重新开始下一局")
 
         logger.info("游戏结束")
@@ -607,7 +636,9 @@ class ClassicalGameState:
         )
 
         has_ai_player = any(player.user_id <= 10 for player in self.player_list)
-        if not has_ai_player and game_id:
+        if self.room_type == "events":
+            logger.info(f'比赛场对局，仅保存牌谱，跳过统计数据保存，game_id: {game_id}')
+        elif not has_ai_player and game_id:
             total_rounds = len(self.game_record.get("game_round", {}))
             self.db_manager.store_classical_game_stats(
                 game_id,
@@ -727,8 +758,9 @@ class ClassicalGameState:
         hepai_fan: Optional[List[str]],
         hepai_fu_types: Optional[List[str]],
         hu_class: Optional[str],
+        next_status: Optional[str] = None,
     ) -> float:
-        """数和尾结算：四家分别计副，若一家有 x 副，则向所有不足 x 副且未和牌者收 x 分。"""
+        """数和尾结算：先结算和牌家（另三家各付和牌总副），再结算其余玩家两两副差比对。"""
         player_fu = {}
         player_fan: Dict[int, List[str]] = {}
         player_fu_types: Dict[int, List[str]] = {}
@@ -745,21 +777,37 @@ class ClassicalGameState:
 
         shuhewei_changes = {p.player_index: 0 for p in self.player_list}
         indices = [p.player_index for p in self.player_list]
-        dealer_index = 0 # 古典麻将：座位 0 始终为庄家（连庄通过 keep_dealer_seat 保持）
+        dealer_index = 0  # 古典麻将：座位 0 始终为庄家（连庄通过 keep_dealer_seat 保持）
 
-        for receiver in indices:
-            receiver_fu = player_fu[receiver]
+        def _dealer_multiplier(receiver: int, payer: int) -> int:
+            return 2 if (receiver == dealer_index or payer == dealer_index) else 1
+
+        def _apply_transfer(receiver: int, payer: int, amount: int) -> None:
+            shuhewei_changes[receiver] += amount
+            shuhewei_changes[payer] -= amount
+
+        # 一、和牌家：另三家各付和牌总副（涉及庄家翻倍）
+        if hepai_player_index is not None and hepai_total_fu is not None:
             for payer in indices:
+                if payer == hepai_player_index:
+                    continue
+                transfer = hepai_total_fu * _dealer_multiplier(hepai_player_index, payer)
+                _apply_transfer(hepai_player_index, payer, transfer)
+
+        # 二、其余玩家两两比对副差（有和牌时排除和牌家；流局时四家互比）
+        compare_indices = (
+            [i for i in indices if i != hepai_player_index]
+            if hepai_player_index is not None
+            else indices
+        )
+        for receiver in compare_indices:
+            receiver_fu = player_fu[receiver]
+            for payer in compare_indices:
                 if payer == receiver:
                     continue
-                if hepai_player_index is not None and payer == hepai_player_index:
-                    continue
                 if player_fu[payer] < receiver_fu:
-                    # 庄家收支翻倍（庄家幺二）：副数本身不变，仅最终转账翻倍
-                    multiplier = 2 if (receiver == dealer_index or payer == dealer_index) else 1
-                    transfer = receiver_fu * multiplier
-                    shuhewei_changes[receiver] += transfer
-                    shuhewei_changes[payer] -= transfer
+                    transfer = (receiver_fu - player_fu[payer]) * _dealer_multiplier(receiver, payer)
+                    _apply_transfer(receiver, payer, transfer)
 
         for player in self.player_list:
             player.score += shuhewei_changes[player.player_index]
@@ -793,6 +841,7 @@ class ClassicalGameState:
             hepai_player_index,
             self.player_list[hepai_player_index].hand_tiles if hepai_player_index is not None else None,
             self.player_list[hepai_player_index].combination_mask if hepai_player_index is not None else None,
+            next_status,
         )
         return reveal_wait
 

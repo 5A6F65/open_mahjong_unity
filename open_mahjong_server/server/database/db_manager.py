@@ -7,17 +7,25 @@ from psycopg2 import Error
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool, SimpleConnectionPool
 from typing import Optional, Dict, Any, List
+from datetime import datetime, timezone
 import logging
 import threading
 import hashlib
 import secrets
 import json
 
+# 禁止登录的封禁类型
+LOGIN_BAN_TYPES = frozenset({'login', 'full'})
+# 封禁解封联系 QQ
+BAN_CONTACT_QQ = '1448826180'
+
 logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
     """PostgreSQL 数据库管理类"""
+
+    LOGIN_IP_KEEP_LIMIT = 20
     
     def __init__(self, host: str, user: str, password: str, database: str, port: int = 5432, minconn: int = 2, maxconn: int = 10):
         self.config = {
@@ -122,15 +130,46 @@ class DatabaseManager:
                     cursor.execute("ROLLBACK TO SAVEPOINT sp_add_original_player_index;")
                 else:
                     raise
-            # 从牌谱 JSON 回填 room_type
-            cursor.execute("""
-                UPDATE game_player_records gpr
-                SET room_type = gr.record->'game_title'->>'room_type'
-                FROM game_records gr
-                WHERE gpr.game_id = gr.game_id
-                  AND (gpr.room_type IS NULL OR gpr.room_type = '')
-                  AND gr.record->'game_title'->>'room_type' IS NOT NULL;
-            """)
+            # 迁移：追加 match_tier（排位场次等级 beginner/intermediate/advanced/mcrpl）
+            cursor.execute("SAVEPOINT sp_add_match_tier;")
+            try:
+                cursor.execute("ALTER TABLE game_player_records ADD COLUMN match_tier VARCHAR(24) NULL;")
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_add_match_tier;")
+                else:
+                    raise
+            # 迁移：追加 event_id（比赛场 room_type='events' 的比赛唯一 id）
+            cursor.execute("SAVEPOINT sp_add_event_id;")
+            try:
+                cursor.execute("ALTER TABLE game_player_records ADD COLUMN event_id VARCHAR(64) NULL;")
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_add_event_id;")
+                else:
+                    raise
+            # 迁移：牌谱收藏（每用户最多 50 条由业务层限制）
+            cursor.execute("SAVEPOINT sp_add_is_favorite;")
+            try:
+                cursor.execute(
+                    "ALTER TABLE game_player_records ADD COLUMN is_favorite BOOLEAN NOT NULL DEFAULT FALSE;"
+                )
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_add_is_favorite;")
+                else:
+                    raise
+            # 迁移：牌谱个人备注
+            cursor.execute("SAVEPOINT sp_add_note;")
+            try:
+                cursor.execute(
+                    "ALTER TABLE game_player_records ADD COLUMN note VARCHAR(200) NULL;"
+                )
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_add_note;")
+                else:
+                    raise
             # 迁移：若表中曾有 mode 列，将 mode 拷贝到 match_type 后丢弃 mode
             cursor.execute("""
                 SELECT 1 FROM information_schema.columns
@@ -166,6 +205,8 @@ class DatabaseManager:
                     third_place_count INT NOT NULL DEFAULT 0,
                     fourth_place_count INT NOT NULL DEFAULT 0,
                     fulu_round_count INT NOT NULL DEFAULT 0,
+                    cuohe_count INT NOT NULL DEFAULT 0,
+                    total_round_score INT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (user_id, rule, mode)
@@ -488,6 +529,35 @@ class DatabaseManager:
                 );
             """)
 
+            # Jiandan owns its fan-ID schema in the rule-local database module.
+            from .jiandan.store_jiandan import create_jiandan_stats_tables
+            create_jiandan_stats_tables(cursor)
+
+            # 创建表 changsha_history_stats（长沙麻将基础统计）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS changsha_history_stats (
+                    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    rule VARCHAR(10) NOT NULL,
+                    mode VARCHAR(20) NOT NULL,
+                    total_games INT NOT NULL DEFAULT 0,
+                    total_rounds INT NOT NULL DEFAULT 0,
+                    win_count INT NOT NULL DEFAULT 0,
+                    self_draw_count INT NOT NULL DEFAULT 0,
+                    deal_in_count INT NOT NULL DEFAULT 0,
+                    total_fan_score INT NOT NULL DEFAULT 0,
+                    total_win_turn INT NOT NULL DEFAULT 0,
+                    total_fangchong_score INT NOT NULL DEFAULT 0,
+                    first_place_count INT NOT NULL DEFAULT 0,
+                    second_place_count INT NOT NULL DEFAULT 0,
+                    third_place_count INT NOT NULL DEFAULT 0,
+                    fourth_place_count INT NOT NULL DEFAULT 0,
+                    fulu_round_count INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, rule, mode)
+                );
+            """)
+
             # users 表迁移：is_mcrpl_qualified、sponsor_expires_at（赞助到期时间，NULL 表示非赞助或已过期）
             for col_name, col_def in [
                 ("is_mcrpl_qualified", "BOOLEAN NOT NULL DEFAULT FALSE"),
@@ -509,6 +579,21 @@ class DatabaseManager:
                     cursor.execute("ROLLBACK TO SAVEPOINT sp_add_sponsor_expires_at;")
                 else:
                     raise
+
+            # users 表迁移：账号封禁字段
+            for col_name, col_def in [
+                ("ban_expires_at", "TIMESTAMP NULL"),
+                ("ban_type", "VARCHAR(32) NULL"),
+                ("ban_reason", "TEXT NULL"),
+            ]:
+                cursor.execute(f"SAVEPOINT sp_add_{col_name};")
+                try:
+                    cursor.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_def};")
+                except Error as e:
+                    if getattr(e, "pgcode", None) == "42701":
+                        cursor.execute(f"ROLLBACK TO SAVEPOINT sp_add_{col_name};")
+                    else:
+                        raise
 
             # 旧版 is_sponsor 布尔字段迁移为 sponsor_expires_at 后删除
             cursor.execute("""
@@ -614,6 +699,33 @@ class DatabaseManager:
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_friend_requests_to ON user_friend_requests(to_user_id);")
 
+            # 用户登录 IP 记录（每用户最多保留最近 20 条，由应用层裁剪）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_login_ips (
+                    id         BIGSERIAL PRIMARY KEY,
+                    user_id    BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    ip_address VARCHAR(45) NOT NULL,
+                    logged_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_user_login_ips_user_time
+                ON user_login_ips(user_id, logged_at DESC);
+            """)
+
+            # IP 封禁表（每个 IP 一条记录，upsert 更新）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS ip_bans (
+                    id             BIGSERIAL PRIMARY KEY,
+                    ip_address     VARCHAR(45) NOT NULL UNIQUE,
+                    ban_expires_at TIMESTAMP NULL,
+                    ban_reason     TEXT NULL,
+                    created_by     BIGINT NULL REFERENCES users(user_id) ON DELETE SET NULL,
+                    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
 
             # 创建游客用户序列（9000000-9900000）
             cursor.execute("CREATE SEQUENCE IF NOT EXISTS tourist_user_id_seq START 9000000 INCREMENT 1 MAXVALUE 9900000 CYCLE;")
@@ -646,10 +758,242 @@ class DatabaseManager:
                     else:
                         raise
 
+            # 迁移：国标 history_stats 增加错和次数字段
+            cursor.execute("SAVEPOINT sp_cuohe_guobiao_history_stats;")
+            try:
+                cursor.execute(
+                    "ALTER TABLE guobiao_history_stats "
+                    "ADD COLUMN cuohe_count INT NOT NULL DEFAULT 0;"
+                )
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_cuohe_guobiao_history_stats;")
+                else:
+                    raise
+
+            # 迁移：国标 history_stats 增加累计小局净得分（局均点分子）
+            cursor.execute("SAVEPOINT sp_round_score_guobiao_history_stats;")
+            try:
+                cursor.execute(
+                    "ALTER TABLE guobiao_history_stats "
+                    "ADD COLUMN total_round_score INT NOT NULL DEFAULT 0;"
+                )
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_round_score_guobiao_history_stats;")
+                else:
+                    raise
+
+            # ===== 每日统计相关表 =====
+            # 每玩家每局原始指标：供每天 4 点聚合，避免重解牌谱 JSON
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS game_player_metrics (
+                    id BIGSERIAL PRIMARY KEY,
+                    game_id VARCHAR(16) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    username VARCHAR(255) NOT NULL,
+                    rule VARCHAR(10) NOT NULL,
+                    sub_rule VARCHAR(32) NULL,
+                    room_type VARCHAR(16) NULL,
+                    match_tier VARCHAR(24) NULL,
+                    event_id VARCHAR(64) NULL,
+                    game_type VARCHAR(16) NULL,
+                    match_type VARCHAR(24) NULL,
+                    score INT NOT NULL DEFAULT 0,
+                    rank INT NOT NULL,
+                    total_rounds INT NOT NULL DEFAULT 0,
+                    win_count INT NOT NULL DEFAULT 0,
+                    self_draw_count INT NOT NULL DEFAULT 0,
+                    deal_in_count INT NOT NULL DEFAULT 0,
+                    total_fan_score INT NOT NULL DEFAULT 0,
+                    total_win_turn INT NOT NULL DEFAULT 0,
+                    total_fangchong_score INT NOT NULL DEFAULT 0,
+                    first_place_count INT NOT NULL DEFAULT 0,
+                    second_place_count INT NOT NULL DEFAULT 0,
+                    third_place_count INT NOT NULL DEFAULT 0,
+                    fourth_place_count INT NOT NULL DEFAULT 0,
+                    fulu_round_count INT NOT NULL DEFAULT 0,
+                    cuohe_count INT NOT NULL DEFAULT 0,
+                    total_round_score INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_game_player_metrics_created_at "
+                "ON game_player_metrics (created_at);"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_game_player_metrics_scene "
+                "ON game_player_metrics (room_type, match_tier, event_id, game_type);"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_game_player_metrics_ladder_day "
+                "ON game_player_metrics (created_at, match_tier) "
+                "WHERE room_type = 'match' AND match_tier IN "
+                "('beginner', 'intermediate', 'advanced', 'mcrpl');"
+            )
+
+            # 每日全站统计：对局数 / 日活 / 活跃用户 / 最大在线
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_stats (
+                    stat_date DATE PRIMARY KEY,
+                    game_count INT NOT NULL DEFAULT 0,
+                    dau INT NOT NULL DEFAULT 0,
+                    active_users INT NOT NULL DEFAULT 0,
+                    max_online INT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute("SAVEPOINT sp_add_daily_stats_dau;")
+            try:
+                cursor.execute(
+                    "ALTER TABLE daily_stats ADD COLUMN dau INT NOT NULL DEFAULT 0;"
+                )
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_add_daily_stats_dau;")
+                else:
+                    raise
+
+            # 每日登录用户（注册用户日活，登录时 UPSERT，不受 IP 记录 20 条裁剪影响）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_login_users (
+                    stat_date DATE NOT NULL,
+                    user_id   BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    PRIMARY KEY (stat_date, user_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_login_users_stat_date
+                ON daily_login_users(stat_date);
+            """)
+            cursor.execute("""
+                INSERT INTO daily_login_users (stat_date, user_id)
+                SELECT DISTINCT
+                    ((logged_at AT TIME ZONE 'Asia/Shanghai') - interval '4 hours')::date,
+                    user_id
+                FROM user_login_ips
+                WHERE user_id > 10000000
+                ON CONFLICT (stat_date, user_id) DO NOTHING
+            """)
+
+            # 当日在线峰值缓存：每 60s 由采样器 UPSERT(GREATEST) 持久化，
+            # 服务端在凌晨 3-4 点关闭、5 点重启后仍可据此正确重写当日 daily_stats。
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_online_cache (
+                    stat_date DATE PRIMARY KEY,
+                    max_online INT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
+            # 每日场次统计：与 guobiao_history_stats 相同的指标列，按 (日期, 场次, 规则, 局制) 聚合
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scene_daily_stats (
+                    id BIGSERIAL PRIMARY KEY,
+                    stat_date DATE NOT NULL,
+                    room_type VARCHAR(16) NULL,
+                    match_tier VARCHAR(24) NULL,
+                    event_id VARCHAR(64) NULL,
+                    rule VARCHAR(10) NOT NULL,
+                    game_type VARCHAR(16) NULL,
+                    total_games INT NOT NULL DEFAULT 0,
+                    total_rounds INT NOT NULL DEFAULT 0,
+                    win_count INT NOT NULL DEFAULT 0,
+                    self_draw_count INT NOT NULL DEFAULT 0,
+                    deal_in_count INT NOT NULL DEFAULT 0,
+                    total_fan_score INT NOT NULL DEFAULT 0,
+                    total_win_turn INT NOT NULL DEFAULT 0,
+                    total_fangchong_score INT NOT NULL DEFAULT 0,
+                    first_place_count INT NOT NULL DEFAULT 0,
+                    second_place_count INT NOT NULL DEFAULT 0,
+                    third_place_count INT NOT NULL DEFAULT 0,
+                    fourth_place_count INT NOT NULL DEFAULT 0,
+                    fulu_round_count INT NOT NULL DEFAULT 0,
+                    cuohe_count INT NOT NULL DEFAULT 0,
+                    total_round_score INT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (stat_date, room_type, match_tier, event_id, rule, game_type)
+                );
+            """)
+
+            # 天梯场次番种按日累计（04:00 聚合时 DELETE+INSERT，可安全重跑）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scene_tier_fan_daily (
+                    stat_date DATE NOT NULL,
+                    match_tier VARCHAR(24) NOT NULL,
+                    rule VARCHAR(10) NOT NULL DEFAULT 'guobiao',
+                    fan_field VARCHAR(32) NOT NULL,
+                    fan_count INT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (stat_date, match_tier, rule, fan_field)
+                );
+            """)
+
+            # 比赛场：赛事实体与管理员（room_type='events' + event_id）
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id   VARCHAR(32) PRIMARY KEY,
+                    name       VARCHAR(128) NOT NULL,
+                    status     VARCHAR(16) NOT NULL DEFAULT 'registered',
+                    created_by BIGINT NOT NULL,
+                    closed_at  TIMESTAMP NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT events_status_chk CHECK (status IN ('registered', 'active', 'closed'))
+                );
+            """)
+            cursor.execute("SAVEPOINT sp_events_reopen;")
+            try:
+                cursor.execute(
+                    "ALTER TABLE events ADD COLUMN reopen_requested BOOLEAN NOT NULL DEFAULT FALSE;"
+                )
+            except Error as e:
+                if getattr(e, "pgcode", None) == "42701":
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_events_reopen;")
+                else:
+                    raise
+            cursor.execute("SAVEPOINT sp_events_status_chk;")
+            try:
+                cursor.execute("ALTER TABLE events DROP CONSTRAINT IF EXISTS events_status_chk;")
+                cursor.execute(
+                    "ALTER TABLE events ADD CONSTRAINT events_status_chk "
+                    "CHECK (status IN ('registered', 'active', 'closed'));"
+                )
+            except Error:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_events_status_chk;")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_status
+                ON events(status);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_created_at
+                ON events(created_at DESC);
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS event_admins (
+                    event_id   VARCHAR(32) NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+                    user_id    BIGINT NOT NULL,
+                    role       VARCHAR(16) NOT NULL,
+                    added_by   BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (event_id, user_id),
+                    CONSTRAINT event_admins_role_chk CHECK (role IN ('owner', 'admin'))
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_event_admins_user
+                ON event_admins(user_id);
+            """)
+
             conn.commit() # 提交
             logger.info('数据表初始化成功')
             print('数据表初始化成功')
             self._get_pool()
+
+            # 清理远古数据：删除 room_type 不属于 match/custom/events 的对局记录
+            # （早期数据可能 room_type 为 NULL 或非法值），重建统计前先清掉避免污染。
+            self._cleanup_legacy_room_type_records()
 
         except Exception as e:
             logger.error(f'数据表初始化失败: {e}', exc_info=True)
@@ -660,7 +1004,45 @@ class DatabaseManager:
             if conn:
                 cursor.close()
                 conn.close()
-    
+
+    def _cleanup_legacy_room_type_records(self) -> None:
+        """清理远古数据：删除 room_type 不属于 match/custom/events 的对局。
+
+        删除 game_records（级联到 game_player_records），并清理 game_player_metrics
+        中对应 game_id 的残留。每次 init 执行一次，无遗留时无副作用。
+        """
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT game_id FROM game_player_records
+                WHERE room_type IS NULL OR room_type NOT IN ('match','custom','events')
+            """)
+            legacy_game_ids = [r[0] for r in cursor.fetchall()]
+            if not legacy_game_ids:
+                return
+            logger.info("清理远古 room_type 数据：game_id 数=%d", len(legacy_game_ids))
+            # game_player_metrics 无 FK，需显式删
+            cursor.execute(
+                "DELETE FROM game_player_metrics WHERE game_id = ANY(%s::varchar[])",
+                (legacy_game_ids,),
+            )
+            # 删 game_records 级联到 game_player_records
+            cursor.execute(
+                "DELETE FROM game_records WHERE game_id = ANY(%s::varchar[])",
+                (legacy_game_ids,),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"清理远古 room_type 数据失败: {e}", exc_info=True)
+            if conn:
+                conn.rollback()
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
     # 获取用户名
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         """
@@ -719,6 +1101,86 @@ class DatabaseManager:
             if conn:
                 conn.rollback()
             return None
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def record_user_login_ip(self, user_id: int, ip_address: str) -> bool:
+        """记录一次成功登录的 IP，并裁剪为每用户最近 LOGIN_IP_KEEP_LIMIT 条。"""
+        ip = (ip_address or "").strip()[:45] or "unknown"
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO user_login_ips (user_id, ip_address) VALUES (%s, %s)",
+                (user_id, ip),
+            )
+            if user_id > 10000000:
+                from .daily_aggregator import current_stat_date
+                cursor.execute(
+                    """
+                    INSERT INTO daily_login_users (stat_date, user_id)
+                    VALUES (%s, %s)
+                    ON CONFLICT (stat_date, user_id) DO NOTHING
+                    """,
+                    (current_stat_date(), user_id),
+                )
+            cursor.execute(
+                """
+                DELETE FROM user_login_ips
+                WHERE user_id = %s
+                  AND id NOT IN (
+                    SELECT id FROM user_login_ips
+                    WHERE user_id = %s
+                    ORDER BY logged_at DESC, id DESC
+                    LIMIT %s
+                  )
+                """,
+                (user_id, user_id, self.LOGIN_IP_KEEP_LIMIT),
+            )
+            conn.commit()
+            return True
+        except Error as e:
+            logger.error(f'记录登录 IP 失败 user_id={user_id}: {e}')
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def get_recent_login_ips(self, user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        """获取用户最近若干次登录 IP。"""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """
+                SELECT ip_address, logged_at
+                FROM user_login_ips
+                WHERE user_id = %s
+                ORDER BY logged_at DESC, id DESC
+                LIMIT %s
+                """,
+                (user_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "ip_address": row["ip_address"],
+                    "logged_at": str(row["logged_at"]),
+                }
+                for row in rows
+            ]
+        except Error as e:
+            logger.error(f'查询登录 IP 失败 user_id={user_id}: {e}')
+            if conn:
+                conn.rollback()
+            return []
         finally:
             if conn:
                 cursor.close()
@@ -882,6 +1344,216 @@ class DatabaseManager:
         )
         return f"{salt.hex()}:{pwd_hash.hex()}"
     
+    @staticmethod
+    def format_ban_expires_at(expires_at: Optional[datetime]) -> str:
+        """将封禁到期时间格式化为展示用字符串。"""
+        if expires_at is None:
+            return '永久'
+        if isinstance(expires_at, str):
+            try:
+                expires_at = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            except ValueError:
+                return expires_at
+        if expires_at.year >= 2099:
+            return '永久'
+        if expires_at.tzinfo is not None:
+            local = expires_at.astimezone()
+        else:
+            local = expires_at
+        return local.strftime('%Y-%m-%d %H:%M:%S')
+
+    @staticmethod
+    def is_login_ban_active(user: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+        """判断用户当前是否处于禁止登录的封禁状态。"""
+        ban_type = user.get('ban_type')
+        if not ban_type or ban_type not in LOGIN_BAN_TYPES:
+            return False
+        ban_expires_at = user.get('ban_expires_at')
+        if ban_expires_at is None:
+            return True
+        if now is None:
+            now = datetime.now(timezone.utc) if getattr(ban_expires_at, 'tzinfo', None) else datetime.now()
+        if isinstance(ban_expires_at, str):
+            try:
+                ban_expires_at = datetime.fromisoformat(ban_expires_at.replace('Z', '+00:00'))
+            except ValueError:
+                return True
+        expires = ban_expires_at
+        if getattr(expires, 'tzinfo', None) is not None and now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        elif getattr(expires, 'tzinfo', None) is None and now.tzinfo is not None:
+            expires = expires.replace(tzinfo=now.tzinfo)
+        return expires > now
+
+    @classmethod
+    def build_login_ban_message(cls, user: Dict[str, Any]) -> str:
+        """生成登录被拒时的封禁提示文案。"""
+        ban_reason = (user.get('ban_reason') or '无').strip() or '无'
+        expires_text = cls.format_ban_expires_at(user.get('ban_expires_at'))
+        if expires_text == '永久':
+            return (
+                f'您的账户已被永久封禁 封禁原因：{ban_reason} '
+                f'请联系qq{BAN_CONTACT_QQ} 解封'
+            )
+        return (
+            f'您的账户已经被封禁至{expires_text} 封禁原因：{ban_reason} '
+            f'请联系qq{BAN_CONTACT_QQ} 解封'
+        )
+
+    @staticmethod
+    def is_ban_expired(ban_expires_at: Any, now: Optional[datetime] = None) -> bool:
+        """封禁是否已过期（ban_expires_at 为 NULL 表示永久有效）。"""
+        if ban_expires_at is None:
+            return False
+        if now is None:
+            now = datetime.now(timezone.utc) if getattr(ban_expires_at, 'tzinfo', None) else datetime.now()
+        if isinstance(ban_expires_at, str):
+            try:
+                ban_expires_at = datetime.fromisoformat(ban_expires_at.replace('Z', '+00:00'))
+            except ValueError:
+                return False
+        expires = ban_expires_at
+        if getattr(expires, 'tzinfo', None) is not None and now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        elif getattr(expires, 'tzinfo', None) is None and now.tzinfo is not None:
+            expires = expires.replace(tzinfo=now.tzinfo)
+        return expires <= now
+
+    @classmethod
+    def build_ip_ban_message(cls, ban: Dict[str, Any]) -> str:
+        """生成 IP 被封禁时的登录提示文案。"""
+        ban_reason = (ban.get('ban_reason') or '无').strip() or '无'
+        expires_text = cls.format_ban_expires_at(ban.get('ban_expires_at'))
+        if expires_text == '永久':
+            return (
+                f'您的 IP 已被永久封禁 封禁原因：{ban_reason} '
+                f'请联系qq{BAN_CONTACT_QQ} 解封'
+            )
+        return (
+            f'您的 IP 已被封禁至{expires_text} 封禁原因：{ban_reason} '
+            f'请联系qq{BAN_CONTACT_QQ} 解封'
+        )
+
+    def get_active_ip_ban(self, ip_address: str) -> Optional[Dict[str, Any]]:
+        """查询 IP 当前生效的封禁记录。"""
+        ip = (ip_address or "").strip()[:45]
+        if not ip or ip == "unknown":
+            return None
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM ip_bans WHERE ip_address = %s",
+                (ip,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            ban = dict(row)
+            if self.is_ban_expired(ban.get('ban_expires_at')):
+                return None
+            return ban
+        except Error as e:
+            logger.error(f'查询 IP 封禁失败 ip={ip}: {e}')
+            if conn:
+                conn.rollback()
+            return None
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def upsert_ip_ban(
+        self,
+        ip_address: str,
+        ban_expires_at: Optional[datetime],
+        ban_reason: Optional[str],
+        created_by: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """新增或更新 IP 封禁。"""
+        ip = (ip_address or "").strip()[:45]
+        if not ip:
+            return None
+        reason = (ban_reason or "").strip() or None
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """
+                INSERT INTO ip_bans (ip_address, ban_expires_at, ban_reason, created_by, updated_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (ip_address) DO UPDATE SET
+                    ban_expires_at = EXCLUDED.ban_expires_at,
+                    ban_reason = EXCLUDED.ban_reason,
+                    created_by = EXCLUDED.created_by,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING *
+                """,
+                (ip, ban_expires_at, reason, created_by),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+        except Error as e:
+            logger.error(f'写入 IP 封禁失败 ip={ip}: {e}')
+            if conn:
+                conn.rollback()
+            return None
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def delete_ip_ban(self, ip_address: str) -> bool:
+        """解除 IP 封禁。"""
+        ip = (ip_address or "").strip()[:45]
+        if not ip:
+            return False
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM ip_bans WHERE ip_address = %s", (ip,))
+            conn.commit()
+            return cursor.rowcount > 0
+        except Error as e:
+            logger.error(f'删除 IP 封禁失败 ip={ip}: {e}')
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def list_ip_bans(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """分页列出 IP 封禁记录。"""
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """
+                SELECT id, ip_address, ban_expires_at, ban_reason, created_by, created_at, updated_at
+                FROM ip_bans
+                ORDER BY updated_at DESC, id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except Error as e:
+            logger.error(f'列出 IP 封禁失败: {e}')
+            if conn:
+                conn.rollback()
+            return []
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
     def verify_password(self, password: str, stored_hash: str) -> bool:
         """
         验证密码是否匹配存储的哈希值
@@ -913,7 +1585,13 @@ class DatabaseManager:
         # 比较计算哈希与存储哈希
         return secrets.compare_digest(computed_hash, stored_hash_hex)
     
-    def get_record_list(self, user_id: int, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+    def get_record_list(
+        self,
+        user_id: int,
+        limit: int = 20,
+        offset: int = 0,
+        favorites_only: bool = False,
+    ) -> List[Dict[str, Any]]:
         """
         获取指定用户的最近 N 局游戏记录元数据（不含完整牌谱），按 created_at 倒序分页。
         
@@ -921,6 +1599,7 @@ class DatabaseManager:
             user_id: 用户ID
             limit: 返回游戏数量限制，默认20
             offset: 跳过的局数，用于滚动加载更多
+            favorites_only: 为 True 时仅返回已收藏牌谱
         
         Returns:
             游戏记录列表，每个记录包含：
@@ -933,12 +1612,13 @@ class DatabaseManager:
         try:
             conn = self._get_connection()
             cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            cursor.execute("""
-                SELECT gpr.game_id, gr.created_at
+
+            favorite_filter = " AND gpr.is_favorite = TRUE" if favorites_only else ""
+            cursor.execute(f"""
+                SELECT gpr.game_id, gr.created_at, gpr.is_favorite, gpr.note
                 FROM game_player_records gpr
                 INNER JOIN game_records gr ON gpr.game_id = gr.game_id
-                WHERE gpr.user_id = %s
+                WHERE gpr.user_id = %s{favorite_filter}
                 ORDER BY gr.created_at DESC, gpr.game_id DESC
                 LIMIT %s OFFSET %s
             """, (user_id, limit, offset))
@@ -949,6 +1629,13 @@ class DatabaseManager:
                 return []
             
             game_ids = [row['game_id'] for row in id_rows]
+            self_meta = {
+                row['game_id']: {
+                    'is_favorite': bool(row.get('is_favorite')),
+                    'note': row.get('note') or '',
+                }
+                for row in id_rows
+            }
             
             placeholders = ','.join(['%s'] * len(game_ids))
             cursor.execute(f"""
@@ -980,6 +1667,7 @@ class DatabaseManager:
                 game_id = row['game_id']
                 
                 if game_id not in games_dict:
+                    meta = self_meta.get(game_id, {})
                     games_dict[game_id] = {
                         'game_id': game_id,
                         'created_at': str(row['created_at']),
@@ -987,6 +1675,8 @@ class DatabaseManager:
                         'sub_rule': row.get('sub_rule'),
                         'match_type': row.get('match_type'),
                         'room_type': row.get('room_type'),
+                        'is_favorite': meta.get('is_favorite', False),
+                        'note': meta.get('note', ''),
                         'players': []
                     }
                 
@@ -1004,12 +1694,148 @@ class DatabaseManager:
             
             records = [games_dict[gid] for gid in game_ids if gid in games_dict]
             
-            logger.info(f'获取用户 {user_id} 的 {len(records)} 局游戏记录元数据 (offset={offset}, limit={limit})')
+            logger.info(
+                f'获取用户 {user_id} 的 {len(records)} 局游戏记录元数据 '
+                f'(offset={offset}, limit={limit}, favorites_only={favorites_only})'
+            )
             return records
             
         except Error as e:
             logger.error(f'获取游戏记录列表失败: {e}', exc_info=True)
             return []
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    MAX_RECORD_FAVORITES = 50
+    MAX_RECORD_NOTE_LENGTH = 200
+
+    def set_record_favorite(self, user_id: int, game_id: str, is_favorite: bool) -> Dict[str, Any]:
+        """
+        设置当前用户对某局牌谱的收藏状态。收藏上限 MAX_RECORD_FAVORITES。
+        返回 {success, message, is_favorite}。
+        """
+        game_id = (game_id or "").strip()
+        if not game_id:
+            return {"success": False, "message": "缺少牌谱ID", "is_favorite": False}
+
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            cursor.execute(
+                """
+                SELECT is_favorite FROM game_player_records
+                WHERE game_id = %s AND user_id = %s
+                """,
+                (game_id, user_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return {"success": False, "message": "未找到该牌谱记录", "is_favorite": False}
+
+            current = bool(row.get("is_favorite"))
+            if current == bool(is_favorite):
+                return {
+                    "success": True,
+                    "message": "收藏状态未变化",
+                    "is_favorite": current,
+                }
+
+            if is_favorite:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS cnt FROM game_player_records
+                    WHERE user_id = %s AND is_favorite = TRUE
+                    """,
+                    (user_id,),
+                )
+                cnt = int(cursor.fetchone()["cnt"])
+                if cnt >= self.MAX_RECORD_FAVORITES:
+                    return {
+                        "success": False,
+                        "message": f"收藏已达上限（{self.MAX_RECORD_FAVORITES}）",
+                        "is_favorite": False,
+                    }
+
+            cursor.execute(
+                """
+                UPDATE game_player_records
+                SET is_favorite = %s
+                WHERE game_id = %s AND user_id = %s
+                """,
+                (bool(is_favorite), game_id, user_id),
+            )
+            conn.commit()
+            return {
+                "success": True,
+                "message": "已收藏" if is_favorite else "已取消收藏",
+                "is_favorite": bool(is_favorite),
+            }
+        except Error as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"设置牌谱收藏失败: {e}", exc_info=True)
+            return {"success": False, "message": "设置收藏失败", "is_favorite": False}
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def set_record_note(self, user_id: int, game_id: str, note: Optional[str]) -> Dict[str, Any]:
+        """
+        设置当前用户对某局牌谱的备注。返回 {success, message, note}。
+        """
+        game_id = (game_id or "").strip()
+        if not game_id:
+            return {"success": False, "message": "缺少牌谱ID", "note": ""}
+
+        note_text = (note or "").strip()
+        if len(note_text) > self.MAX_RECORD_NOTE_LENGTH:
+            return {
+                "success": False,
+                "message": f"备注最长 {self.MAX_RECORD_NOTE_LENGTH} 字",
+                "note": "",
+            }
+        if not note_text:
+            note_text = None
+
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+            cursor.execute(
+                """
+                SELECT 1 FROM game_player_records
+                WHERE game_id = %s AND user_id = %s
+                """,
+                (game_id, user_id),
+            )
+            if not cursor.fetchone():
+                return {"success": False, "message": "未找到该牌谱记录", "note": ""}
+
+            cursor.execute(
+                """
+                UPDATE game_player_records
+                SET note = %s
+                WHERE game_id = %s AND user_id = %s
+                """,
+                (note_text, game_id, user_id),
+            )
+            conn.commit()
+            return {
+                "success": True,
+                "message": "备注已保存",
+                "note": note_text or "",
+            }
+        except Error as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"设置牌谱备注失败: {e}", exc_info=True)
+            return {"success": False, "message": "保存备注失败", "note": ""}
         finally:
             if conn:
                 cursor.close()
@@ -1637,6 +2463,89 @@ class DatabaseManager:
                 cursor.close()
                 self._put_connection(conn)
 
+    def get_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """按 event_id 取赛事实体；不存在返回 None。"""
+        if not event_id:
+            return None
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """
+                SELECT event_id, name, status, created_by, closed_at, created_at, updated_at
+                FROM events WHERE event_id = %s
+                """,
+                (event_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Error as e:
+            logger.error(f'get_event 失败: {e}')
+            if conn:
+                conn.rollback()
+            return None
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def get_event_admin_role(self, event_id: str, user_id: int) -> Optional[str]:
+        """返回用户在赛事中的角色 owner/admin；无权限返回 None。"""
+        if not event_id or not user_id:
+            return None
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT role FROM event_admins
+                WHERE event_id = %s AND user_id = %s
+                """,
+                (event_id, user_id),
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except Error as e:
+            logger.error(f'get_event_admin_role 失败: {e}')
+            if conn:
+                conn.rollback()
+            return None
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
+    def list_user_active_events(self, user_id: int) -> List[Dict[str, Any]]:
+        """列出用户可管理且 status=active 的赛事。"""
+        if not user_id:
+            return []
+        conn = None
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(
+                """
+                SELECT e.event_id, e.name, e.status, ea.role
+                FROM event_admins ea
+                INNER JOIN events e ON e.event_id = ea.event_id
+                WHERE ea.user_id = %s AND e.status = 'active'
+                ORDER BY e.created_at DESC
+                """,
+                (user_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        except Error as e:
+            logger.error(f'list_user_active_events 失败: {e}')
+            if conn:
+                conn.rollback()
+            return []
+        finally:
+            if conn:
+                cursor.close()
+                self._put_connection(conn)
+
 
 # 挂载国标麻将相关方法到 DatabaseManager 类
 from .guobiao.store_guobiao import store_guobiao_game_record, store_guobiao_game_stats, store_guobiao_fan_stats
@@ -1663,6 +2572,23 @@ DatabaseManager.store_classical_fan_stats = store_classical_fan_stats
 from .sichuan.store_sichuan import store_sichuan_game_record
 
 DatabaseManager.store_sichuan_game_record = store_sichuan_game_record
+
+# 挂载长沙麻将相关方法到 DatabaseManager 类
+from .changsha.store_changsha import store_changsha_game_record, store_changsha_game_stats
+
+DatabaseManager.store_changsha_game_record = store_changsha_game_record
+DatabaseManager.store_changsha_game_stats = store_changsha_game_stats
+
+# Jiandan keeps replay and statistics adapters in the rule-local database module.
+from .jiandan.store_jiandan import (
+    store_jiandan_fan_stats,
+    store_jiandan_game_record,
+    store_jiandan_game_stats,
+)
+
+DatabaseManager.store_jiandan_game_record = store_jiandan_game_record
+DatabaseManager.store_jiandan_game_stats = store_jiandan_game_stats
+DatabaseManager.store_jiandan_fan_stats = store_jiandan_fan_stats
 
 from .riichi.store_riichi import store_riichi_game_record, store_riichi_game_stats, store_riichi_fan_stats
 from .riichi.get_riichi_stats import get_riichi_stats

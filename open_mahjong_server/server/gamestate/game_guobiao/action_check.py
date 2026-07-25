@@ -33,21 +33,20 @@ def check_action_after_cut(self,cut_tile):
         for item in self.player_list:
             if item.hand_tiles.count(cut_tile) >= 2:
                 temp_action_dict[item.player_index].append("peng")
-                break
         
         # 检测杠牌：手牌中有3张相同的牌
         for item in self.player_list:
             if item.hand_tiles.count(cut_tile) == 3:
                 if self.tiles_list != []:
                         temp_action_dict[item.player_index].append("gang")
-                        break
 
-    # 如果该牌是任意家的等待牌 且不是自己
+    # 切牌后刷新他家听牌再判荣和（避免开局未刷新 waiting_tiles 导致漏判）
     for item in self.player_list:
-        if cut_tile in item.waiting_tiles and item.player_index != self.current_player_index:
-            refresh_waiting_tiles(self, item.player_index)
-            if cut_tile in item.waiting_tiles:
-                check_hepai(self,temp_action_dict,cut_tile,item.player_index,"dianhe")
+        if item.player_index == self.current_player_index:
+            continue
+        refresh_waiting_tiles(self, item.player_index)
+        if cut_tile in item.waiting_tiles:
+            check_hepai(self, temp_action_dict, cut_tile, item.player_index, "dianhe")
 
     # 如果玩家有操作 则添加pass
     for i in temp_action_dict:
@@ -179,7 +178,7 @@ def check_hepai(self,temp_action_dict,hepai_tile,player_index,hepai_type,is_firs
     elif hepai_type == "dianhe":
         way_to_hepai.append("点和")
         if len(self.tiles_list) == 0:
-            way_to_hepai.append("海底捞月")
+            way_to_hepai.append("last_cut")  # 牌墙空荣和 → 海底捞月
 
     # 自摸 / 杠上开花（杠上开花需同时传自摸，计番侧据此判不求人）
     elif hepai_type == "handgot":
@@ -188,7 +187,7 @@ def check_hepai(self,temp_action_dict,hepai_tile,player_index,hepai_type,is_firs
         if is_get_gang_tile:
             way_to_hepai.append("杠上开花")
         if len(self.tiles_list) == 0:
-            way_to_hepai.append("妙手回春")
+            way_to_hepai.append("last_deal")  # 牌墙空自摸 → 妙手回春
 
     # 获取场风
     if self.current_round <= 4:
@@ -241,7 +240,6 @@ def check_hepai(self,temp_action_dict,hepai_tile,player_index,hepai_type,is_firs
             way_to_hepai.remove("和绝张")
 
     # 使用计算服务类检查和牌（根据子规则选择检查方法）
-    print(tiles_list,combination_tiles,way_to_hepai,hepai_tile)
     if hasattr(self, 'sub_rule') and self.sub_rule == "guobiao/xiaolin":
         result = self.calculation_service.GB_xiaolin_hepai_check(tiles_list,combination_tiles,way_to_hepai,hepai_tile)
     elif hasattr(self, 'sub_rule') and self.sub_rule == "guobiao/kshen":

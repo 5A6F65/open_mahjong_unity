@@ -2,10 +2,11 @@
   <div>
     <h2 class="page-title">仪表盘</h2>
     <el-row :gutter="16" v-loading="loading">
-      <el-col :span="8" v-for="card in cards" :key="card.label">
+      <el-col :xs="12" :sm="8" :span="8" v-for="card in cards" :key="card.label">
         <el-card shadow="hover" class="stat-card">
           <div class="stat-label">{{ card.label }}</div>
           <div class="stat-value">{{ card.value }}</div>
+          <div v-if="card.hint" class="stat-hint">{{ card.hint }}</div>
         </el-card>
       </el-col>
     </el-row>
@@ -17,6 +18,8 @@
         <el-button @click="$router.push('/admin/games')">对局查询</el-button>
         <el-button @click="$router.push('/admin/audit')">操作审计</el-button>
         <el-button @click="$router.push('/admin/messages')">消息推送</el-button>
+        <el-button @click="$router.push('/admin/send-email')">发送邮件</el-button>
+        <el-button @click="$router.push('/admin/ip-bans')">IP 封禁</el-button>
       </el-space>
     </el-card>
   </div>
@@ -35,7 +38,7 @@ const cards = computed(() => {
   return [
     { label: '注册用户', value: s.registered_users },
     { label: '游客账号', value: s.tourist_users },
-    { label: '今日对局', value: s.games_today },
+    { label: '今日对局', value: s.games_today, hint: '凌晨4:00刷新' },
     { label: '排行榜人数', value: s.leaderboard_eligible },
     { label: '用户总数', value: s.total_users },
   ]
@@ -67,7 +70,31 @@ onMounted(async () => {
   font-weight: 600;
   margin-top: 8px;
 }
+.stat-hint {
+  color: #c0c4cc;
+  font-size: 12px;
+  margin-top: 6px;
+}
 .quick-card {
   margin-top: 8px;
+}
+.quick-card :deep(.el-space) {
+  width: 100%;
+}
+@media (max-width: 768px) {
+  .quick-card :deep(.el-space) {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .quick-card :deep(.el-space__item) {
+    margin: 0 !important;
+  }
+  .quick-card :deep(.el-button) {
+    width: 100%;
+  }
+  .stat-value {
+    font-size: 22px;
+  }
 }
 </style>

@@ -21,7 +21,10 @@ from ...response import (
     Ready_status_info,
 )
 from ..public.ai.auto_cut_ai import auto_cut_action
+from ..public.offline import offline_auto_action
 from ..public.ai.riichi_smart_bot_ai import riichi_smart_bot_action as smart_bot_action
+from ..public.deal_tile_view import sanitize_deal_tile_for_viewer
+from ..public.hand_slot_utils import bot_ask_hand_game_status
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +128,15 @@ async def broadcast_ask_hand_action(self):
         try:
             if "offline" in cp.tag_list:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(offline_auto_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             if cp.user_id == 0:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             if cp.user_id == 2:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(smart_bot_action(self, i, self.action_dict[i], bot_ask_hand_game_status(self, i)))
                 continue
             if cp.user_id not in self.game_server.user_id_to_connection:
                 continue
@@ -170,7 +173,7 @@ async def broadcast_ask_other_action(self):
         try:
             if "offline" in cp.tag_list:
                 if self.action_dict.get(i, []):
-                    asyncio.create_task(auto_cut_action(self, i, self.action_dict[i], self.game_status))
+                    asyncio.create_task(offline_auto_action(self, i, self.action_dict[i], self.game_status))
                 continue
             if cp.user_id == 0:
                 if self.action_dict.get(i, []):
@@ -220,6 +223,7 @@ async def broadcast_do_action(
     is_mo_gang: bool = None,
     is_claim: bool = False,
     silent: bool = False,
+    cut_from_player: int = None,
 ):
     if not is_claim:
         self.server_action_tick += 1
@@ -232,6 +236,7 @@ async def broadcast_do_action(
             if cp.user_id not in self.game_server.user_id_to_connection:
                 continue
             conn = self.game_server.user_id_to_connection[cp.user_id]
+            viewer_deal_tile = sanitize_deal_tile_for_viewer(deal_tile, action_player, cp.player_index)
             response = Response(
                 type="gamestate/riichi/do_action",
                 success=True,
@@ -243,7 +248,7 @@ async def broadcast_do_action(
                     cut_tile=cut_tile,
                     cut_class=cut_class,
                     cut_tile_index=cut_tile_index,
-                    deal_tile=deal_tile,
+                    deal_tile=viewer_deal_tile,
                     buhua_tile=buhua_tile,
                     combination_mask=combination_mask,
                     combination_target=combination_target,
@@ -251,6 +256,7 @@ async def broadcast_do_action(
                     is_mo_gang=is_mo_gang,
                     is_claim=True if is_claim else None,
                     silent=True if silent else None,
+                    cut_from_player=cut_from_player,
                 ),
             )
             await conn.websocket.send_json(response.dict(exclude_none=True))
@@ -284,6 +290,7 @@ async def broadcast_result(
     langyong_multiplier: Optional[int] = None,
     langyong_scored_points: Optional[int] = None,
     silent: bool = False,
+    next_status: Optional[str] = None,
 ):
     self.server_action_tick += 1
     for cp in self.player_list:
@@ -322,6 +329,7 @@ async def broadcast_result(
                     langyong_multiplier=langyong_multiplier,
                     langyong_scored_points=langyong_scored_points,
                     silent=True if silent else None,
+                    next_status=next_status,
                 ),
             )
             await conn.websocket.send_json(response.dict(exclude_none=True))

@@ -1,14 +1,16 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using System.Runtime.InteropServices;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.Universal;
 
 public class ConfigManager : MonoBehaviour {
     public static ConfigManager Instance { get; private set; }
 
     public static bool Debug = false;
-    
+
     public static string webUrl;
     public static string gameUrl;
     public static string chatUrl;
@@ -16,22 +18,24 @@ public class ConfigManager : MonoBehaviour {
     public static int releaseVersion;
     public static string githubUrl;
     public static string documentUrl;
+    public static string mobileDownloadUrl;
 
     static ConfigManager() {
         if (Debug) {
             // 开发接口地址
             gameUrl = "ws://localhost:8081/game"; // 游戏服务器地址(连接到OMU服务器)
             chatUrl = "ws://localhost:8083/chat"; // 聊天服务器地址(连接到OMUChat服务器)
-            releaseVersion = 8; // 发行版号(验证客户端-服务器版本是否一致)
+            releaseVersion = 18; // 发行版号(验证客户端-服务器版本是否一致)
         } else {
             // 生产环境接口地址
             gameUrl = "wss://salasasa.cn/game";
             chatUrl = "wss://salasasa.cn/chat";
-            releaseVersion = 8;
+            releaseVersion = 18;
         }
         // 官方服务器链接网址 用于访问转到 （不影响游戏进程）
-        clientVersion = "0.4.68.1"; // 仅存储 [大版本号.发行版号.开发版本.开发小版本号]
+        clientVersion = "0.4.73.2"; // 仅存储 [大版本号.发行版号.开发版本.开发小版本号]
         webUrl = "https://salasasa.cn"; // 访问转到
+        mobileDownloadUrl = "https://salasasa.cn/mobile-download"; // Android APK 版本更新下载页
         documentUrl = "https://www.yuque.com/xelnaga-yjcgq/zkwfgr/lusmvid200iez36q?singleDoc#"; // 访问转到
         githubUrl = "https://github.com/xelnagamiao/open_mahjong_unity"; // 访问转到
     }
@@ -60,6 +64,10 @@ public class ConfigManager : MonoBehaviour {
     private const string KEY_HAND_SORT_DRAGON_ORDER = "HandSortDragonOrderMode";
     private const string KEY_HAND_SORT_RIICHI_DRAGON_ORDER = "HandSortRiichiDragonOrderMode";
     private const string KEY_LANGUAGE = "AppLanguage";
+    private const string KEY_ACTION_BUTTON_COLOR_ENABLED = "ActionButtonColorEnabled";
+    private const string KEY_GONG_HU_SOUND_ENABLED = "GongHuSoundEnabled";
+    private const string KEY_MATCH_SUCCESS_SOUND_ENABLED = "MatchSuccessSoundEnabled";
+    private const string KEY_TILE_OUTLINE_PRESET = "TileOutlinePreset";
 
     private static AppLanguage _languageMode = AppLanguage.SimplifiedChinese;
     public static event Action OnLanguageChanged;
@@ -90,6 +98,19 @@ public class ConfigManager : MonoBehaviour {
     public int HandSortDragonOrderMode { get; private set; }
     /// <summary>日麻三元牌排序：2 白发中(46→47→45，默认)，索引对应 TileIdOrder.RiichiDragonOrderOptions（日麻对局使用）</summary>
     public int HandSortRiichiDragonOrderMode { get; private set; }
+    /// <summary>操作按钮分色：关时全部使用 GameCanvas 的 fallback 配色</summary>
+    public bool ActionButtonColorEnabled { get; private set; }
+    /// <summary>高番敲锣音效：默认开启</summary>
+    public bool GongHuSoundEnabled { get; private set; }
+    /// <summary>匹配成功音效：默认开启</summary>
+    public bool MatchSuccessSoundEnabled { get; private set; }
+    /// <summary>3D 牌描边预设：1=标准纯黑(2/2)，2=粗深黑(3/3)，默认 1</summary>
+    public int TileOutlinePreset { get; private set; }
+
+    public static readonly string[] TileOutlinePresetLabels = {
+        "预设1",
+        "预设2",
+    };
 
     /// <summary>与 RiichiTileUtil / 牌面资源一致：白板 id 为 46（47 为发）。</summary>
     public const int WhiteDragonTileId = 46;
@@ -126,7 +147,7 @@ public class ConfigManager : MonoBehaviour {
         Instance = this;
         // 供 WebGL 的 JS 插件 SendMessage 定位用
         gameObject.name = "GlobalConfig";
-        
+
         // 加载用户配置
         MasterVolume = PlayerPrefs.GetInt(KEY_MASTER_VOLUME, DEFAULT_VOLUME);
         MusicVolume = PlayerPrefs.GetInt(KEY_MUSIC_VOLUME, DEFAULT_VOLUME);
@@ -143,6 +164,10 @@ public class ConfigManager : MonoBehaviour {
         HandSortDragonOrderMode = Mathf.Clamp(PlayerPrefs.GetInt(KEY_HAND_SORT_DRAGON_ORDER, 0), 0, TileIdOrder.DragonOrderOptions.Length - 1);
         HandSortRiichiDragonOrderMode = Mathf.Clamp(PlayerPrefs.GetInt(KEY_HAND_SORT_RIICHI_DRAGON_ORDER, 2), 0, TileIdOrder.RiichiDragonOrderOptions.Length - 1);
         _languageMode = (AppLanguage)Mathf.Clamp(PlayerPrefs.GetInt(KEY_LANGUAGE, (int)AppLanguage.SimplifiedChinese), 0, 2);
+        ActionButtonColorEnabled = PlayerPrefs.GetInt(KEY_ACTION_BUTTON_COLOR_ENABLED, 0) == 1;
+        GongHuSoundEnabled = PlayerPrefs.GetInt(KEY_GONG_HU_SOUND_ENABLED, 1) == 1;
+        MatchSuccessSoundEnabled = PlayerPrefs.GetInt(KEY_MATCH_SUCCESS_SOUND_ENABLED, 1) == 1;
+        TileOutlinePreset = Mathf.Clamp(PlayerPrefs.GetInt(KEY_TILE_OUTLINE_PRESET, 1), 1, 2);
         TileIdOrder.SetSortRule(HandSortSuitOrderMode, HandSortHonorOrderMode, HandSortDragonOrderMode, HandSortRiichiDragonOrderMode);
 #if UNITY_WEBGL && !UNITY_EDITOR
         TargetFrameRate = WebLockedFrameRate;
@@ -153,10 +178,12 @@ public class ConfigManager : MonoBehaviour {
         QualitySettings.vSyncCount = 0;
         ApplyTargetFrameRate();
         Application.runInBackground = true;
+        ApplyAntialiasingByPlatform();
     }
 
-    public void SetUserConfig(int volume) {
-        MasterVolume = Mathf.Clamp(volume, 0, 100);
+    private void Start() {
+        ApplyCameraAntialiasingByPlatform();
+        ApplyTileOutlinePreset();
     }
 
     public void SetMasterVolume(int volume) {
@@ -314,6 +341,58 @@ public class ConfigManager : MonoBehaviour {
         OnLanguageChanged?.Invoke();
     }
 
+    public void SetActionButtonColorEnabled(bool enabled) {
+        ActionButtonColorEnabled = enabled;
+        PlayerPrefs.SetInt(KEY_ACTION_BUTTON_COLOR_ENABLED, enabled ? 1 : 0);
+        PlayerPrefs.Save();
+        if (GameCanvas.Instance != null) {
+            GameCanvas.Instance.RefreshActionButtonColors();
+        }
+    }
+
+    public void SetGongHuSoundEnabled(bool enabled) {
+        GongHuSoundEnabled = enabled;
+        PlayerPrefs.SetInt(KEY_GONG_HU_SOUND_ENABLED, enabled ? 1 : 0);
+        PlayerPrefs.Save();
+    }
+
+    public void SetMatchSuccessSoundEnabled(bool enabled) {
+        MatchSuccessSoundEnabled = enabled;
+        PlayerPrefs.SetInt(KEY_MATCH_SUCCESS_SOUND_ENABLED, enabled ? 1 : 0);
+        PlayerPrefs.Save();
+    }
+
+    /// <summary>下拉索引 0/1 → 预设 1/2；默认预设 2。</summary>
+    public void SetTileOutlinePresetFromDropdown(int dropdownIndex) {
+        SetTileOutlinePreset(dropdownIndex + 1);
+    }
+
+    public void SetTileOutlinePreset(int preset) {
+        TileOutlinePreset = Mathf.Clamp(preset, 1, 2);
+        PlayerPrefs.SetInt(KEY_TILE_OUTLINE_PRESET, TileOutlinePreset);
+        PlayerPrefs.Save();
+        ApplyTileOutlinePreset();
+    }
+
+    /// <summary>
+    /// 预设1：宽2/外扩2/纯黑；预设2：宽3/外扩3/深黑。
+    /// </summary>
+    public void ApplyTileOutlinePreset() {
+        if (!TileOutline.TryGetFeature(out _)) {
+            return;
+        }
+        if (TileOutlinePreset == 1) {
+            TileOutline.SetWidth(2f);
+            TileOutline.SetExpand(2f);
+            TileOutline.SetColor(Color.black); // 纯黑
+        } else {
+            TileOutline.SetWidth(3f);
+            TileOutline.SetExpand(3f);
+            TileOutline.SetColor(new Color(0.12f, 0.12f, 0.12f, 1f)); // 深黑
+        }
+        TileOutline.Enabled = true;
+    }
+
     // 应用排序规则到 TileIdOrder，并在对局中开启自动理牌时立即按新规则重排当前手牌。
     private void ApplyHandSortRule() {
         TileIdOrder.SetSortRule(HandSortSuitOrderMode, HandSortHonorOrderMode, HandSortDragonOrderMode, HandSortRiichiDragonOrderMode);
@@ -339,6 +418,46 @@ public class ConfigManager : MonoBehaviour {
 #else
         Application.targetFrameRate = TargetFrameRate;
 #endif
+    }
+
+    // Windows / WebGL / iOS / Editor：URP MSAA 4x；Android：MSAA 关 + 相机 FXAA 兜底。
+    private const int MsaaSampleCountHigh = 4;
+    // Android 保留 6/28 PR#50 规避：MSAA 会强制中间 render pass，Mali Valhall Vulkan 上触发 Canvas 丢失。
+    private const int MsaaSampleCountDisabled = 1;
+
+    private static void ApplyAntialiasingByPlatform() {
+        if (!(UniversalRenderPipeline.asset is UniversalRenderPipelineAsset urpAsset)) return;
+#if UNITY_ANDROID && !UNITY_EDITOR
+        int target = MsaaSampleCountDisabled;
+#else
+        int target = MsaaSampleCountHigh;
+#endif
+        // 仅在值变化时写入，避免无意义脏标记触发管线重建
+        if (urpAsset.msaaSampleCount != target) {
+            urpAsset.msaaSampleCount = target;
+        }
+    }
+
+    private static void ApplyCameraAntialiasingByPlatform() {
+#if UNITY_ANDROID && !UNITY_EDITOR
+        ApplyCameraFxaa(true);
+#else
+        ApplyCameraFxaa(false);
+#endif
+    }
+
+    private static void ApplyCameraFxaa(bool enable) {
+        var cameras = UnityEngine.Object.FindObjectsByType<Camera>(FindObjectsSortMode.None);
+        foreach (var camera in cameras) {
+            if (camera == null || !camera.isActiveAndEnabled) continue;
+            if (!camera.TryGetComponent<UniversalAdditionalCameraData>(out var cameraData)) continue;
+            if (enable) {
+                cameraData.antialiasing = AntialiasingMode.FastApproximateAntialiasing;
+                cameraData.antialiasingQuality = AntialiasingQuality.High;
+            } else {
+                cameraData.antialiasing = AntialiasingMode.None;
+            }
+        }
     }
 
     private static int NormalizeTargetFrameRate(int frameRate) {

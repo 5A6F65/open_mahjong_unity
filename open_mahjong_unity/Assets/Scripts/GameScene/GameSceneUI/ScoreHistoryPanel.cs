@@ -21,12 +21,19 @@ public class ScoreHistoryPanel : MonoBehaviour
     [SerializeField] private Transform player3RoundScoreContainer;
     [SerializeField] private Transform player3GameScoreContainer;
 
+    [Header("本局分差列颜色")]
+    [SerializeField] private Color scoreGainColor = Color.green;
+    [SerializeField] private Color scoreLossColor = Color.red;
+    [SerializeField] private Color tsumoLossColor = Color.blue;
+
     private static readonly Dictionary<string, Dictionary<int, string>> RuleToRoundMap = new Dictionary<string, Dictionary<int, string>> {
         { "guobiao", RoundTextDictionary.CurrentRoundTextGB },
         { "qingque", RoundTextDictionary.CurrentRoundTextQingque },
         { "riichi", RoundTextDictionary.CurrentRoundTextRiichi },
         { "classical", RoundTextDictionary.CurrentRoundTextClassical },
         { "sichuan", RoundTextDictionary.CurrentRoundTextSichuan },
+        { "changsha", RoundTextDictionary.CurrentRoundTextChangsha },
+        { "jiandan", RoundTextDictionary.CurrentRoundTextJiandan },
     };
 
     private void Awake()
@@ -45,8 +52,6 @@ public class ScoreHistoryPanel : MonoBehaviour
 
     private void OnEnable()
     {
-        if (GameSceneUIManager.Instance == null) return;
-
         bool recordActive = GameRecordManager.Instance != null
             && GameRecordManager.Instance.gameObject.activeSelf
             && GameRecordManager.Instance.gameRecord != null;
@@ -56,7 +61,6 @@ public class ScoreHistoryPanel : MonoBehaviour
         }
 
         var mgr = NormalGameStateManager.Instance;
-        if (mgr == null) return;
         if (!mgr.IsGameActive && mgr.roundSettlementHistory.Count == 0) return;
         GameSceneUIManager.Instance.UpdateScoreRecord();
     }
@@ -187,13 +191,13 @@ public class ScoreHistoryPanel : MonoBehaviour
         if (player_to_info == null || player_to_info.Count < 4) return;
 
         if (roundSettlements == null || roundSettlements.Count == 0) {
-            roundSettlements = NormalGameStateManager.Instance?.roundSettlementHistory;
+            roundSettlements = NormalGameStateManager.Instance.roundSettlementHistory;
         }
 
         // 总局数（用于预测未来局名占位）：优先用调用方传入，其次回退到实时对局的 maxRound（风圈数）*4
         if (totalRounds <= 0) {
             var mgr = NormalGameStateManager.Instance;
-            if (mgr != null && mgr.maxRound > 0) {
+            if (mgr.maxRound > 0) {
                 totalRounds = mgr.maxRound * 4;
             }
         }
@@ -217,10 +221,10 @@ public class ScoreHistoryPanel : MonoBehaviour
         }
 
         InitializeScoreRecord(rule,
-            sorted[0].original_player_index, ResolveDisplayName(sorted[0]), sorted[0].score_history ?? new List<string>(),
-            sorted[1].original_player_index, ResolveDisplayName(sorted[1]), sorted[1].score_history ?? new List<string>(),
-            sorted[2].original_player_index, ResolveDisplayName(sorted[2]), sorted[2].score_history ?? new List<string>(),
-            sorted[3].original_player_index, ResolveDisplayName(sorted[3]), sorted[3].score_history ?? new List<string>(),
+            sorted[0].original_player_index, ResolveDisplayName(sorted[0]), sorted[0].score, sorted[0].score_history ?? new List<string>(),
+            sorted[1].original_player_index, ResolveDisplayName(sorted[1]), sorted[1].score, sorted[1].score_history ?? new List<string>(),
+            sorted[2].original_player_index, ResolveDisplayName(sorted[2]), sorted[2].score, sorted[2].score_history ?? new List<string>(),
+            sorted[3].original_player_index, ResolveDisplayName(sorted[3]), sorted[3].score, sorted[3].score_history ?? new List<string>(),
             roundNumberHistory,
             roundSettlements,
             totalRounds);
@@ -228,10 +232,10 @@ public class ScoreHistoryPanel : MonoBehaviour
 
     public void InitializeScoreRecord(
         string rule,
-        int originIndex0, string username0, List<string> scoreHistory0,
-        int originIndex1, string username1, List<string> scoreHistory1,
-        int originIndex2, string username2, List<string> scoreHistory2,
-        int originIndex3, string username3, List<string> scoreHistory3,
+        int originIndex0, string username0, int absoluteScore0, List<string> scoreHistory0,
+        int originIndex1, string username1, int absoluteScore1, List<string> scoreHistory1,
+        int originIndex2, string username2, int absoluteScore2, List<string> scoreHistory2,
+        int originIndex3, string username3, int absoluteScore3, List<string> scoreHistory3,
         List<int> roundNumberHistory = null,
         IReadOnlyList<RoundSettlementSnapshot> roundSettlements = null,
         int totalRounds = 0)
@@ -244,7 +248,7 @@ public class ScoreHistoryPanel : MonoBehaviour
         ClearContainer(MainFanContainer);
 
         if (roundSettlements == null || roundSettlements.Count == 0) {
-            roundSettlements = NormalGameStateManager.Instance?.roundSettlementHistory;
+            roundSettlements = NormalGameStateManager.Instance.roundSettlementHistory;
         }
 
         string baseRule = rule ?? "";
@@ -259,14 +263,9 @@ public class ScoreHistoryPanel : MonoBehaviour
 
         string subRule = ScoreHistorySettlementHelper.ResolveSubRule(
             rule,
-            NormalGameStateManager.Instance != null ? NormalGameStateManager.Instance.subRule : null);
+            NormalGameStateManager.Instance.subRule);
 
         List<int> roundNumbers = roundNumberHistory ?? new List<int>();
-        if (roundNumbers.Count == 0) {
-            var fallbackKeys = new List<int>(roundMap.Keys);
-            fallbackKeys.Sort();
-            roundNumbers = fallbackKeys;
-        }
 
         int scoreHistoryCount = scoreHistory0 != null ? scoreHistory0.Count : 0;
         if (scoreHistory1 != null) scoreHistoryCount = Mathf.Max(scoreHistoryCount, scoreHistory1.Count);
@@ -274,13 +273,10 @@ public class ScoreHistoryPanel : MonoBehaviour
         if (scoreHistory3 != null) scoreHistoryCount = Mathf.Max(scoreHistoryCount, scoreHistory3.Count);
 
         int roundCount = scoreHistoryCount;
-        if (roundSettlements != null && roundSettlements.Count > roundCount) {
-            roundCount = roundSettlements.Count;
-        }
 
         int maxPlayedRoundNumber = 0;
         for (int i = 0; i < roundCount; i++) {
-            int roundNumber = i < roundNumbers.Count ? roundNumbers[i] : (i + 1);
+            int roundNumber = ScoreHistorySettlementHelper.ResolveRoundNumberForRow(i, scoreHistoryCount, roundNumbers);
             if (roundNumber > maxPlayedRoundNumber) maxPlayedRoundNumber = roundNumber;
             GameObject textObj = Instantiate(Tmp_Text_Prefab, RoundIndexContainer.transform);
             TMP_Text text = textObj.GetComponent<TMP_Text>();
@@ -310,12 +306,12 @@ public class ScoreHistoryPanel : MonoBehaviour
             AddEmptyCell(MainFanContainer);
         }
 
-        var players = new List<(int originIndex, string username, List<string> scoreHistory, TMP_Text userNameText, Transform roundScoreContainer, Transform gameScoreContainer)>
+        var players = new List<(int originIndex, string username, int absoluteScore, List<string> scoreHistory, TMP_Text userNameText, Transform roundScoreContainer, Transform gameScoreContainer)>
         {
-            (originIndex0, username0, scoreHistory0 ?? new List<string>(), player0UserName, player0RoundScoreContainer, player0GameScoreContainer),
-            (originIndex1, username1, scoreHistory1 ?? new List<string>(), player1UserName, player1RoundScoreContainer, player1GameScoreContainer),
-            (originIndex2, username2, scoreHistory2 ?? new List<string>(), player2UserName, player2RoundScoreContainer, player2GameScoreContainer),
-            (originIndex3, username3, scoreHistory3 ?? new List<string>(), player3UserName, player3RoundScoreContainer, player3GameScoreContainer)
+            (originIndex0, username0, absoluteScore0, scoreHistory0 ?? new List<string>(), player0UserName, player0RoundScoreContainer, player0GameScoreContainer),
+            (originIndex1, username1, absoluteScore1, scoreHistory1 ?? new List<string>(), player1UserName, player1RoundScoreContainer, player1GameScoreContainer),
+            (originIndex2, username2, absoluteScore2, scoreHistory2 ?? new List<string>(), player2UserName, player2RoundScoreContainer, player2GameScoreContainer),
+            (originIndex3, username3, absoluteScore3, scoreHistory3 ?? new List<string>(), player3UserName, player3RoundScoreContainer, player3GameScoreContainer)
         };
 
         players.Sort((a, b) => a.originIndex.CompareTo(b.originIndex));
@@ -330,7 +326,11 @@ public class ScoreHistoryPanel : MonoBehaviour
             ClearContainer(player.roundScoreContainer);
             ClearContainer(player.gameScoreContainer);
 
-            int cumulativeScore = 0;
+            int historySum = SumScoreHistoryDeltas(player.scoreHistory);
+            // 当前绝对分已含起手分：起手分 = score - Σ(history)；日麻起手>0 时局差列显示绝对点
+            int startingScore = player.absoluteScore - historySum;
+            bool showAbsoluteRiichiScores = startingScore > 0;
+            int cumulativeScore = startingScore;
 
             for (int i = 0; i < player.scoreHistory.Count; i++)
             {
@@ -359,22 +359,13 @@ public class ScoreHistoryPanel : MonoBehaviour
                         displayScoreChange = (scoreChange.StartsWith("+") ? "+" : "-") + absValue.ToString();
                     }
                 }
+                RoundSettlementSnapshot rowSnapshot = ScoreHistorySettlementHelper.ResolveSettlementForRow(
+                    i, player.scoreHistory.Count, roundSettlements);
                 GameObject roundScoreObj = Instantiate(Tmp_Text_Prefab, player.roundScoreContainer.transform);
                 TMP_Text roundScoreText = roundScoreObj.GetComponent<TMP_Text>();
                 if (roundScoreText != null)
                 {
-                    if (scoreValue > 0)
-                    {
-                        roundScoreText.text = $"<color=green>{displayScoreChange}</color>";
-                    }
-                    else if (scoreValue < 0)
-                    {
-                        roundScoreText.text = $"<color=red>{displayScoreChange}</color>";
-                    }
-                    else
-                    {
-                        roundScoreText.text = displayScoreChange;
-                    }
+                    roundScoreText.text = FormatColoredRoundScore(scoreValue, displayScoreChange, rowSnapshot, subRule);
                 }
 
                 cumulativeScore += scoreValue;
@@ -382,7 +373,11 @@ public class ScoreHistoryPanel : MonoBehaviour
                 TMP_Text gameScoreText = gameScoreObj.GetComponent<TMP_Text>();
                 if (gameScoreText != null)
                 {
-                    if (cumulativeScore > 0)
+                    if (showAbsoluteRiichiScores)
+                    {
+                        gameScoreText.text = cumulativeScore.ToString();
+                    }
+                    else if (cumulativeScore > 0)
                     {
                         gameScoreText.text = $"+{cumulativeScore}";
                     }
@@ -411,6 +406,23 @@ public class ScoreHistoryPanel : MonoBehaviour
         }
     }
 
+    private static int SumScoreHistoryDeltas(List<string> history) {
+        if (history == null || history.Count == 0) return 0;
+        int sum = 0;
+        for (int i = 0; i < history.Count; i++) {
+            string entry = history[i];
+            if (string.IsNullOrEmpty(entry)) continue;
+            if (entry.StartsWith("+") || entry.StartsWith("-")) {
+                if (int.TryParse(entry.Substring(1), out int abs)) {
+                    sum += entry.StartsWith("-") ? -abs : abs;
+                }
+            } else if (int.TryParse(entry, out int plain)) {
+                sum += plain;
+            }
+        }
+        return sum;
+    }
+
     /// <summary>在指定列追加一个空白单元格，用于预测局/补齐行数时保持各列对齐。</summary>
     private void AddEmptyCell(Transform container)
     {
@@ -431,7 +443,7 @@ public class ScoreHistoryPanel : MonoBehaviour
         }
 
         if (roundSettlements == null || roundSettlements.Count == 0) {
-            roundSettlements = NormalGameStateManager.Instance?.roundSettlementHistory;
+            roundSettlements = NormalGameStateManager.Instance.roundSettlementHistory;
         }
 
         RoundSettlementSnapshot snapshot = ScoreHistorySettlementHelper.ResolveSettlementForRow(
@@ -466,6 +478,35 @@ public class ScoreHistoryPanel : MonoBehaviour
                 Destroy(child.gameObject);
             }
         }
+    }
+
+    private string FormatColoredRoundScore(int scoreValue, string displayScoreChange, RoundSettlementSnapshot snapshot, string subRule) {
+        if (scoreValue > 0) {
+            return $"<color={ColorToTmpHex(scoreGainColor)}>{displayScoreChange}</color>";
+        }
+        if (scoreValue < 0) {
+            Color lossColor = scoreLossColor;
+            if (!IsSichuanSubRule(subRule) && IsTsumoLossRound(snapshot)) {
+                lossColor = tsumoLossColor;
+            }
+            return $"<color={ColorToTmpHex(lossColor)}>{displayScoreChange}</color>";
+        }
+        return displayScoreChange;
+    }
+
+    private static bool IsSichuanSubRule(string subRule) {
+        return subRule != null && subRule.StartsWith("sichuan");
+    }
+
+    private static bool IsTsumoLossRound(RoundSettlementSnapshot snapshot) {
+        return snapshot != null
+            && snapshot.hasWin
+            && !snapshot.isLiuju
+            && snapshot.huClass == "hu_self";
+    }
+
+    private static string ColorToTmpHex(Color color) {
+        return "#" + ColorUtility.ToHtmlStringRGB(color);
     }
 }
 

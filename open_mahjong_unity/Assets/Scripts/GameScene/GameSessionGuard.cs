@@ -12,6 +12,7 @@ public static class GameSessionGuard {
             if (gsm != null && (gsm.IsGameActive || gsm.IsRealtimeSpectator)) {
                 return true;
             }
+            if (GameRecordManager.HasPendingDelayedSpectatorSessionStatic) return true;
             var grm = GameRecordManager.Instance;
             return grm != null && grm.IsSpectating;
         }
@@ -22,7 +23,7 @@ public static class GameSessionGuard {
     /// </summary>
     public static bool BlockIfExclusiveSession(string actionDescription) {
         if (!HasExclusiveSession) return false;
-        NotificationManager.Instance?.ShowTip("提示", false,
+        NotificationManager.Instance.ShowTip("提示", false,
             $"当前{DescribeCurrentSession()}，无法{actionDescription}");
         return true;
     }
@@ -30,8 +31,12 @@ public static class GameSessionGuard {
     private static string DescribeCurrentSession() {
         var gsm = NormalGameStateManager.Instance;
         if (gsm != null && gsm.IsRealtimeSpectator) return "正在实时观战中";
+        if (GameRecordManager.HasPendingDelayedSpectatorSessionStatic
+            && (GameRecordManager.Instance == null || !GameRecordManager.Instance.IsSpectating)) {
+            return "正在加入延时观战";
+        }
         var grm = GameRecordManager.Instance;
-        if (grm != null && grm.IsSpectating) return "正在观战中";
+        if (grm != null && grm.IsSpectating) return "正在延时观战中";
         if (gsm != null && gsm.IsGameActive) return "正在对局中";
         return "处于进行中的对局或观战";
     }

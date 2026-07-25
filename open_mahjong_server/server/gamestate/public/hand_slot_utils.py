@@ -21,13 +21,14 @@ logger = logging.getLogger(__name__)
 
 TILE_NOT_IN_HAND_TIP_MESSAGE = "此牌不在您的手牌中"
 
-# 赤 5 → 归一化 5
-_AKA_OFFSET = 100
-
-
 def normalize_tile(tile: int) -> int:
-    if tile in (105, 205, 305):
-        return tile - _AKA_OFFSET
+    """赤 5 与普通 5 等价：105→15, 205→25, 305→35（与客户端 RiichiTileUtil 一致）。"""
+    if tile == 105:
+        return 15
+    if tile == 205:
+        return 25
+    if tile == 305:
+        return 35
     return tile
 
 
@@ -50,6 +51,17 @@ def mark_draw_slot(player) -> None:
 
 def clear_draw_slot(player) -> None:
     player.has_draw_slot = False
+
+
+def bot_ask_hand_game_status(game_state, player_index: int) -> str:
+    """ask_hand 派发机器人：吃碰后虽已是 waiting_hand_action 但无摸牌区，语义等同 onlycut_after_action。"""
+    if (
+        game_state.game_status == "waiting_hand_action"
+        and player_index == game_state.current_player_index
+        and not has_draw_slot(game_state.player_list[player_index])
+    ):
+        return "onlycut_after_action"
+    return game_state.game_status
 
 
 def is_last_slot_tile(hand: List[int], tile_id: int) -> bool:
@@ -223,6 +235,13 @@ def resolve_is_mo_gang(hand: List[int], kan_tile: int, *, draw_slot: bool = True
     if not draw_slot or not hand:
         return False
     return tiles_equal(hand[-1], kan_tile)
+
+
+def resolve_is_mo_buhua(hand: List[int], buhua_tile: int, *, draw_slot: bool = True) -> bool:
+    """摸补：有摸牌区且补花张为末张；开局补花轮或手牌区花牌为手补。"""
+    if not draw_slot or not hand:
+        return False
+    return tiles_equal(hand[-1], buhua_tile)
 
 
 def remove_angang_tiles(hand: List[int], normal_tile: int, *, draw_slot: bool = True) -> List[int]:

@@ -1,40 +1,49 @@
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
 public class SoundManager : MonoBehaviour {
     public static SoundManager Instance { get; private set; }
-    
+
     [Header("音效配置")]
     [SerializeField] private AudioSource audioSource; // 环境音效播放器
-    
+
     // 音色ID到文件路径的映射字典
     private Dictionary<int, string> voiceIdToPath = new Dictionary<int, string> {
         { 1, "ttsmaker_204_xiaoxiao" },
         { 2, "ttsmaker_1513_qiuqiu" }
     };
-    
+
     private void Awake() {
         if (Instance != null && Instance != this) {
             Destroy(gameObject);
             return;
         }
         Instance = this;
-        
+
         // 如果没有AudioSource，自动添加一个
         if (audioSource == null) {
             audioSource = gameObject.AddComponent<AudioSource>();
         }
     }
-    
-    
+
     public void PlayActionButtonAppearSound() {
         AudioClip soundToPlay = Resources.Load<AudioClip>("Sound/Effects/mixkit-modern-technology-select-3124");
         if (soundToPlay == null) {
             Debug.LogWarning("未找到操作按钮显示音效: Sound/Effects/mixkit-modern-technology-select-3124");
             return;
         }
-        float volume = ConfigManager.Instance != null ? ConfigManager.Instance.GetSoundEffectVolumeRatio() : 1.0f;
+        float volume = ConfigManager.Instance.GetSoundEffectVolumeRatio();
+        audioSource.PlayOneShot(soundToPlay, volume);
+    }
+
+    /// <summary>对局倒计时剩余 3/2/1 秒时的提示音效。</summary>
+    public void PlayCountdownTickSound() {
+        AudioClip soundToPlay = Resources.Load<AudioClip>("Sound/Effects/Timer02-0.1s");
+        if (soundToPlay == null) {
+            Debug.LogWarning("未找到倒计时音效: Sound/Effects/Timer02-0.1s");
+            return;
+        }
+        float volume = ConfigManager.Instance.GetSoundEffectVolumeRatio();
         audioSource.PlayOneShot(soundToPlay, volume);
     }
 
@@ -44,11 +53,10 @@ public class SoundManager : MonoBehaviour {
         int voiceId = 1; // 默认音色ID
         if (NormalGameStateManager.Instance != null && NormalGameStateManager.Instance.player_to_info.ContainsKey(playerPosition)) {
             voiceId = NormalGameStateManager.Instance.player_to_info[playerPosition].voice_used;
-        } else if (UserDataManager.Instance != null) {
+        } else {
             // 如果无法从NormalGameStateManager获取，则使用用户设置的音色ID作为后备
             voiceId = UserDataManager.Instance.VoiceId;
         }
-
 
         string voicePath = voiceIdToPath.ContainsKey(voiceId) ? voiceIdToPath[voiceId] : voiceIdToPath[1];
         string audioTarget;
@@ -60,9 +68,9 @@ public class SoundManager : MonoBehaviour {
         }
         audioTarget = $"Sound/{voicePath}/{voiceKey}";
         AudioClip soundToPlay = LoadVoiceClipWithFallback(voicePath, voiceKey, out string loadedTarget);
-        
+
         if (soundToPlay != null) {
-            float volume = ConfigManager.Instance != null ? ConfigManager.Instance.GetVoiceVolumeRatio() : 1.0f;
+            float volume = ConfigManager.Instance.GetVoiceVolumeRatio();
             audioSource.PlayOneShot(soundToPlay, volume);
             Debug.Log($"播放音效: {actionType}, 音色: {voicePath}, 资源: {loadedTarget}, 音量: {volume}");
         } else {
@@ -138,7 +146,7 @@ public class SoundManager : MonoBehaviour {
             voiceId = voiceIdOverride.Value;
         } else if (NormalGameStateManager.Instance != null && NormalGameStateManager.Instance.player_to_info.ContainsKey(playerPosition)) {
             voiceId = NormalGameStateManager.Instance.player_to_info[playerPosition].voice_used;
-        } else if (UserDataManager.Instance != null) {
+        } else {
             voiceId = UserDataManager.Instance.VoiceId;
         }
         string voicePath = voiceIdToPath.ContainsKey(voiceId) ? voiceIdToPath[voiceId] : voiceIdToPath[1];
@@ -148,17 +156,20 @@ public class SoundManager : MonoBehaviour {
             Debug.LogWarning("未找到立直音效资源 Sound/<voice>/riichi");
             return;
         }
-        float volume = ConfigManager.Instance != null ? ConfigManager.Instance.GetVoiceVolumeRatio() : 1.0f;
+        float volume = ConfigManager.Instance.GetVoiceVolumeRatio();
         audioSource.PlayOneShot(clip, volume);
     }
 
     public void PlayGameStartSound() {
+        if (ConfigManager.Instance != null && !ConfigManager.Instance.MatchSuccessSoundEnabled) {
+            return;
+        }
         AudioClip soundToPlay = Resources.Load<AudioClip>("Sound/Physics/gamestart");
         if (soundToPlay == null) {
             Debug.LogWarning("未找到匹配成功音效: Sound/Physics/gamestart");
             return;
         }
-        float volume = ConfigManager.Instance != null ? ConfigManager.Instance.GetSoundEffectVolumeRatio() : 1.0f;
+        float volume = ConfigManager.Instance.GetSoundEffectVolumeRatio();
         audioSource.PlayOneShot(soundToPlay, volume * 0.4f);
     }
 
@@ -167,6 +178,9 @@ public class SoundManager : MonoBehaviour {
         if (actionType == "cut") {
             fileName = "SFX_UI_Click_Organic_Plastic_Select_2";
         } else if (actionType == "Gong_hu") {
+            if (ConfigManager.Instance != null && !ConfigManager.Instance.GongHuSoundEnabled) {
+                return;
+            }
             fileName = "Gong_hu";
         } else {
             return;
@@ -176,9 +190,8 @@ public class SoundManager : MonoBehaviour {
             Debug.LogWarning($"未找到物理音效文件: {actionType}");
             return;
         }
-        float volume = ConfigManager.Instance != null ? ConfigManager.Instance.GetSoundEffectVolumeRatio() : 1.0f;
+        float volume = ConfigManager.Instance.GetSoundEffectVolumeRatio();
         audioSource.PlayOneShot(soundToPlay, volume);
         Debug.Log($"播放物理音效: {actionType}, 音量: {volume}");
     }
 }
-

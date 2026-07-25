@@ -130,7 +130,7 @@ public class Kshen_Hepai_Check {
             { "sansesantongshun", new List<string>() },
             { "sansesanjiegao", new List<string>() },
             { "wufanhe", new List<string>() },
-            { "miaoshouhuichun", new List<string>() },
+            { "miaoshouhuichun", new List<string> { "zimo" } },
             { "haidilaoyue", new List<string>() },
             { "gangshangkaihua", new List<string> { "zimo" } },
             { "qiangganghe", new List<string> { "hejuezhang" } },
@@ -186,8 +186,8 @@ public class Kshen_Hepai_Check {
         { "gangshangkaihua", 8 }, { "qiangganghe", 8 }, { "pengpenghe", 12 }, { "hunyise", 16 }, { "sansesanbugao", 4 }, { "wumenqi", 4 }, { "quanqiuren", 0 }, { "shuangangang", 0 }, { "shuangjianke", 0 },
         { "quandaiyao", 12 }, { "buqiuren", 0 }, { "shuangminggang", 0 }, { "hejuezhang", 0 }, { "jianke", 4 }, { "quanfengke", 0 }, { "menfengke", 4 }, { "menqianqing", 4 },
         { "pinghe", 2 }, { "siguiyi", 4 }, { "shuangtongke", 4 }, { "shuanganke", 4 }, { "angang", 0 }, { "duanyao", 2 }, { "yibangao", 4 }, { "xixiangfeng", 2 },
-        { "lianliu", 0 }, { "laoshaofu", 0 }, { "yaojiuke", 0 }, { "minggang", 0 }, { "queyimen", 2 }, { "wuzi", 0 }, { "bianzhang", 2 },
-        { "qianzhang", 2 }, { "dandiaojiang", 2 }, { "zimo", 2 }, { "huapai", 1 }, { "mingangang", 0 },
+        { "lianliu", 0 }, { "laoshaofu", 0 }, { "yaojiuke", 0 }, { "minggang", 0 }, { "queyimen", 2 }, { "wuzi", 0 }, { "bianzhang", 0 },
+        { "qianzhang", 0 }, { "dandiaojiang", 0 }, { "zimo", 2 }, { "huapai", 1 }, { "mingangang", 0 },
         { "anke", 2 }, { "gang", 4 }, { "qingquandaiyao", 24 }, { "quandan", 12 }, { "quanshuang", 24 }, { "silianke", 120 },
         { "jingtongshuangxitongke", 16 }, { "jingtongliangbangao", 32 }, { "jingtongshuanglonghui", 32 },
         };
@@ -204,12 +204,12 @@ public class Kshen_Hepai_Check {
         { "santongke", "三同刻" }, { "sananke", "三暗刻" }, { "quanbukao", "全不靠" }, { "zuhelong", "组合龙" }, { "dayuwu", "大于五" },
         { "xiaoyuwu", "小于五" }, { "sanfengke", "三风刻" }, { "hualong", "花龙" }, { "tuibudao", "推不倒" }, { "sansesantongshun", "三色三同顺" },
         { "sansesanjiegao", "三色连刻" }, { "wufanhe", "无番和" }, { "miaoshouhuichun", "妙手回春" }, { "haidilaoyue", "海底捞月" },
-        { "gangshangkaihua", "杠上开花" }, { "qiangganghe", "抢杠和" }, { "pengpenghe", "碰碰和/对对和" }, { "hunyise", "混一色" },
+        { "gangshangkaihua", "杠上开花" }, { "qiangganghe", "抢杠和" }, { "pengpenghe", "碰碰和" }, { "hunyise", "混一色" },
         { "sansesanbugao", "三色三步高" }, { "wumenqi", "五门齐" }, { "quanqiuren", "全求人" }, { "shuangangang", "双暗杠" },
         { "shuangjianke", "双箭刻" }, { "quandaiyao", "混全带幺" }, { "buqiuren", "不求人" }, { "shuangminggang", "双明杠" },
-        { "hejuezhang", "和绝张" }, { "jianke", "役牌/箭刻" }, { "quanfengke", "圈风刻" }, { "menfengke", "役牌/门风刻" },
-        { "menqianqing", "门前清" }, { "pinghe", "平和" }, { "siguiyi", "四归一" }, { "shuangtongke", "两同刻/双同刻" },
-        { "shuanganke", "暗刻×2/双暗刻" }, { "angang", "暗杠" }, { "duanyao", "断幺" }, { "yibangao", "一般高" }, { "xixiangfeng", "喜相逢" },
+        { "hejuezhang", "和绝张" }, { "jianke", "役·箭刻" }, { "quanfengke", "圈风刻" }, { "menfengke", "役·门风刻" },
+        { "menqianqing", "门前清" }, { "pinghe", "平和" }, { "siguiyi", "四归一" }, { "shuangtongke", "双同刻" },
+        { "shuanganke", "双暗刻" }, { "angang", "暗杠" }, { "duanyao", "断幺" }, { "yibangao", "一般高" }, { "xixiangfeng", "喜相逢" },
         { "lianliu", "连六" }, { "laoshaofu", "老少副" }, { "yaojiuke", "幺九刻" }, { "minggang", "明杠" }, { "queyimen", "缺一门" },
         { "wuzi", "无字" }, { "bianzhang", "独听·边张" }, { "qianzhang", "独听·嵌张" }, { "dandiaojiang", "独听·单钓" },
         { "zimo", "自摸" }, { "huapai", "花牌" }, { "mingangang", "明暗杠" },
@@ -315,7 +315,7 @@ public class Kshen_Hepai_Check {
             // 对比返回元组的第一个元素，只返回第一个元素最大的元组
             allow_list = allow_list.OrderByDescending(x => x.Item1).ToList();
             DebugPrint($"允许的番种：{string.Join(",", allow_list.Select(x => x.Item1))}");
-            
+
             // 如果没有任何和牌组合，抛出详细的异常信息（不包装，直接从这一行抛出）
             if (allow_list.Count == 0) {
                 string debug_info = $"HepaiCheck: allow_list为空，无法返回结果。\n" +
@@ -327,7 +327,7 @@ public class Kshen_Hepai_Check {
                     $"way_to_hepai=[{string.Join(",", way_to_hepai)}]";
                 throw new ArgumentOutOfRangeException("allow_list", allow_list.Count, debug_info);
             }
-            
+
             return allow_list[0];
         }
 
@@ -630,8 +630,8 @@ public class Kshen_Hepai_Check {
                 player_tiles.fan_list.Add("quandan");
             if (hand_tiles_list.All(i => quanshuang_set.Contains(i)))
                 player_tiles.fan_list.Add("quanshuang");
-            
-            // 对手牌映射查表 
+
+            // 对手牌映射查表
             if (hand_tiles_list.All(i => duanyao_set.Contains(i))) {
                 player_tiles.fan_list.Add("duanyao"); // 断幺
                 if (hand_tiles_list.All(i => quanzhong_set.Contains(i))) {
@@ -646,11 +646,11 @@ public class Kshen_Hepai_Check {
             var tiao_zipai = new HashSet<int>(tiao_set);
             tiao_zipai.UnionWith(zipai_set);
 
-            if (hand_tiles_list.All(i => wan_zipai.Contains(i)) || 
-                hand_tiles_list.All(i => bing_zipai.Contains(i)) || 
+            if (hand_tiles_list.All(i => wan_zipai.Contains(i)) ||
+                hand_tiles_list.All(i => bing_zipai.Contains(i)) ||
                 hand_tiles_list.All(i => tiao_zipai.Contains(i))) {
-                if (hand_tiles_list.All(i => wan_set.Contains(i)) || 
-                    hand_tiles_list.All(i => bing_set.Contains(i)) || 
+                if (hand_tiles_list.All(i => wan_set.Contains(i)) ||
+                    hand_tiles_list.All(i => bing_set.Contains(i)) ||
                     hand_tiles_list.All(i => tiao_set.Contains(i))) {
                     var temp_tiles_list = new List<int>(hand_tiles_list);
                     DebugPrint("temp_tiles_list", string.Join(",", temp_tiles_list));
@@ -754,7 +754,7 @@ public class Kshen_Hepai_Check {
         private void FanCountCombinationCheck(PlayerTiles player_tiles) {
             if (player_tiles.combination_list.Count == 0)
                 return;
-            
+
             // 对组合单元本身查表
             // 负责判断全带五 全带幺 箭刻 双箭刻 大四喜 小四喜
             if (player_tiles.combination_list.All(i => quandaiwu_set.Contains(i)))
@@ -821,7 +821,7 @@ public class Kshen_Hepai_Check {
         private void FanCountCombinationStrCheck(PlayerTiles player_tiles, string combination_str, List<int> hand_tiles_list) {
             if (string.IsNullOrEmpty(combination_str))
                 return;
-            
+
             // 对组合映射查表
             // 如果有全不靠加一个顺子 或者四个顺子 同时所有手牌是数牌 满足平和
             int s_count = combination_str.Count(c => c == 's' || c == 'S');
@@ -866,7 +866,7 @@ public class Kshen_Hepai_Check {
             var save_dazi_sign = new List<string>();
             var save_kezi_sign = new List<string>();
             var save_quetou_sign = new List<string>();
-            
+
             for (int index = 0; index < combination_str.Length; index++)
             {
                 char tile_id = combination_str[index];
@@ -1120,23 +1120,21 @@ public class Kshen_Hepai_Check {
                     }
                 }
 
-                // 根据同色手牌标记的距离判断 连六 老少副
+                // 根据同色手牌标记的距离判断 连六 老少副（与 guobiao_hepai_check-kshen.py 一致）
                 foreach (var list in suit_list)
                 {
                     if (list.Count >= 2)
                     {
-                        foreach (var i_str in list)
+                        foreach (var item in list)
                         {
-                            int i = int.Parse(i_str);
+                            int i = int.Parse(item);
                             if (list.Contains((i + 3).ToString()))
-                            {
                                 player_tiles.fan_list.Add("lianliu"); // 连六
-                            }
                         }
                         int min_count = Math.Min(list.Count(x => x == "2"), list.Count(x => x == "8"));
                         if (min_count != 0)
                         {
-                            if (min_count == 2 && player_tiles.fan_list.Contains("qingyise") && 
+                            if (min_count == 2 && player_tiles.fan_list.Contains("qingyise") &&
                                 save_quetou_sign.Count > 0 && int.Parse(save_quetou_sign[0]) % 10 == 5)
                             {
                                 player_tiles.fan_list.Add("yiseshuanglonghui"); // 一色双龙会
@@ -1233,8 +1231,11 @@ public class Kshen_Hepai_Check {
                 {
                     if (all_list.All(i => new[] { "2", "4", "6", "8" }.Contains(i)))
                     {
-                        if (save_quetou_sign.Count > 0 && new[] { "2", "4", "6", "8" }.Contains(save_quetou_sign[0][1].ToString()))
+                        if (save_quetou_sign.Count > 0 &&
+                            new[] { "2", "4", "6", "8" }.Contains(save_quetou_sign[0][1].ToString()))
+                        {
                             player_tiles.fan_list.Add("quanshuangke"); // 全双刻
+                        }
                     }
                 }
 
@@ -1364,8 +1365,9 @@ public class Kshen_Hepai_Check {
                         }
                         break;
 
+                    case "last_deal":
                     case "妙手回春":
-                        player_tiles.fan_list.Add("miaoshouhuichun"); // 妙手回春
+                        player_tiles.fan_list.Add("miaoshouhuichun"); // 妙手回春（牌墙空自摸）
                         break;
                     case "杠上开花":
                         player_tiles.fan_list.Add("gangshangkaihua"); // 杠上开花
@@ -1377,17 +1379,18 @@ public class Kshen_Hepai_Check {
                         player_tiles.fan_list.Add("hejuezhang"); // 和绝张
                         break;
                     case "花牌":
-                        if (way_to_hepai.Any(idx => idx is "妙手回春" or "自摸" or "杠上开花"))
+                        if (way_to_hepai.Any(idx => idx is "last_deal" or "妙手回春" or "自摸" or "杠上开花"))
                             player_tiles.fan_list.Add("huapai");
                         break;
+                    case "last_cut":
                     case "海底捞月":
-                        player_tiles.fan_list.Add("haidilaoyue"); // 海底捞月
+                        player_tiles.fan_list.Add("haidilaoyue"); // 海底捞月（牌墙空荣和）
                         break;
                     case "点和":
                         DebugPrint(string.Join(",", player_tiles.combination_list));
                         int small_count = combination_str.Count(c => c == 's' || c == 'k' || c == 'g');
-                        if (!string.IsNullOrEmpty(combination_str) && 
-                            combination_str.All(c => !new[] { 'S', 'K', 'G', 'z' }.Contains(c)) && 
+                        if (!string.IsNullOrEmpty(combination_str) &&
+                            combination_str.All(c => !new[] { 'S', 'K', 'G', 'z' }.Contains(c)) &&
                             way_to_hepai.Contains("和单张"))
                         {
                             player_tiles.fan_list.Add("quanqiuren"); // 全求人
@@ -1408,7 +1411,7 @@ public class Kshen_Hepai_Check {
                             var specialZimoFans = new HashSet<string> { "qiduizi", "jiulianbaodeng", "lianqidui", "shisanyao", "sianke", "qixingbukao", "quanbukao" };
                             if (smallOpenCount == 0 && !player_tiles.fan_list.Any(f => specialZimoFans.Contains(f)))
                                 player_tiles.fan_list.Add("menqianqing");
-                            if (way_to_hepai.Any(idx => idx is "妙手回春" or "杠上开花" or "海底捞月" or "抢杠和"))
+                            if (way_to_hepai.Any(idx => idx is "last_deal" or "妙手回春" or "杠上开花" or "last_cut" or "海底捞月" or "抢杠和"))
                                 break;
                             player_tiles.fan_list.Add("zimo");
                         }
@@ -1649,7 +1652,7 @@ public class Kshen_Hepai_Check {
         // 主番种计算方法
         public Tuple<int, List<string>> FanCount(PlayerTiles player_tiles, int get_tile, List<string> way_to_hepai) {
             // 判断前处理 处理get_tile
-            bool zimo_or_not = way_to_hepai.Any(i => new[] { "妙手回春", "自摸", "杠上开花" }.Contains(i));
+            bool zimo_or_not = way_to_hepai.Any(i => new[] { "last_deal", "妙手回春", "自摸", "杠上开花" }.Contains(i));
 
             if (!zimo_or_not)
             {
@@ -1683,7 +1686,7 @@ public class Kshen_Hepai_Check {
             // 判断前处理 建立手牌映射和组合映射
             var hand_tiles_list = new List<int>();
             string combination_str = "";
-            
+
             if (player_tiles.fan_list.Any(f => new[] { "qiduizi", "lianqidui" }.Contains(f)))
                 hand_tiles_list = new List<int>(player_tiles.hand_tiles);
             else if (player_tiles.fan_list.Any(f => new[] { "quanbukao", "qixingbukao" }.Contains(f)))
